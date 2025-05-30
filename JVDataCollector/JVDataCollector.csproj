@@ -57,5 +57,29 @@
   <ItemGroup>
     <None Include="App.config" />
   </ItemGroup>
+  <ItemGroup>
+    <COMReference Include="AxJVDTLabLib">
+      <Guid>{2AB17740-0C41-11D7-916F-0003479BEB3F}</Guid>
+      <VersionMajor>1</VersionMajor>
+      <VersionMinor>18</VersionMinor>
+      <Lcid>0</Lcid>
+      <WrapperTool>aximp</WrapperTool>
+      <Isolated>False</Isolated>
+    </COMReference>
+    <COMReference Include="JVDTLabLib">
+      <Guid>{2AB17740-0C41-11D7-916F-0003479BEB3F}</Guid>
+      <VersionMajor>1</VersionMajor>
+      <VersionMinor>18</VersionMinor>
+      <Lcid>0</Lcid>
+      <WrapperTool>tlbimp</WrapperTool>
+      <Isolated>False</Isolated>
+      <EmbedInteropTypes>True</EmbedInteropTypes>
+    </COMReference>
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="JVLinkForm.resx">
+      <DependentUpon>JVLinkForm.cs</DependentUpon>
+    </EmbeddedResource>
+  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

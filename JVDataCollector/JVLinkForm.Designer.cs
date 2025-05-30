@@ -29,12 +29,35 @@ namespace JVDataCollector
         /// </summary>
         private void InitializeComponent()
         {
-            this.components = new System.ComponentModel.Container();
+            System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(JVLinkForm));
+            this.axJVLink1 = new AxJVDTLabLib.AxJVLink();
+            ((System.ComponentModel.ISupportInitialize)(this.axJVLink1)).BeginInit();
+            this.SuspendLayout();
+            // 
+            // axJVLink1
+            // 
+            this.axJVLink1.Enabled = true;
+            this.axJVLink1.Location = new System.Drawing.Point(0, 0);
+            this.axJVLink1.Name = "axJVLink1";
+            this.axJVLink1.OcxState = ((System.Windows.Forms.AxHost.State)(resources.GetObject("axJVLink1.OcxState")));
+            this.axJVLink1.Size = new System.Drawing.Size(288, 288);
+            this.axJVLink1.TabIndex = 0;
+            // 
+            // JVLinkForm
+            // 
+            this.AutoScaleDimensions = new System.Drawing.SizeF(9F, 20F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.ClientSize = new System.Drawing.Size(800, 450);
+            this.Controls.Add(this.axJVLink1);
+            this.Name = "JVLinkForm";
             this.Text = "JVLinkForm";
+            ((System.ComponentModel.ISupportInitialize)(this.axJVLink1)).EndInit();
+            this.ResumeLayout(false);
+
         }
 
         #endregion
+
+        private AxJVDTLabLib.AxJVLink axJVLink1;
     }
 }
