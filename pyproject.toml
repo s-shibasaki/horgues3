@@ -5,3 +5,6 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "horgues3"
 version = "0.1.0"
+
+[tool.setuptools]
+packages = ["horgues3_utils"]
