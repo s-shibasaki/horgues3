@@ -51,6 +51,7 @@ namespace JVDataCollector
             this.Controls.Add(this.axJVLink1);
             this.Name = "JVLinkForm";
             this.Text = "JVLinkForm";
+            this.Load += new System.EventHandler(this.JVLinkForm_Load);
             ((System.ComponentModel.ISupportInitialize)(this.axJVLink1)).EndInit();
             this.ResumeLayout(false);
 
