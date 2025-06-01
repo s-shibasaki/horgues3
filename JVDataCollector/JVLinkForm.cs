@@ -38,6 +38,7 @@ namespace JVDataCollector
             public string Name { get; set; }
             public bool IsPrimaryKey { get; set; } = false;
             public string Comment { get; set; }
+            public string DataType { get; set; } = "CHAR";
         }
 
         public class RepeatFieldDefinition : FieldDefinition
@@ -49,17 +50,8 @@ namespace JVDataCollector
         public class TableMetaData
         {
             public string TableName { get; set; }
-            public List<ColumnMetaData> Columns { get; set; }
+            public List<NormalFieldDefinition> Columns { get; set; }
             public List<string> PrimaryKeys { get; set; }
-            public string Comment { get; set; }
-        }
-
-        public class ColumnMetaData
-        {
-            public string Name { get; set; }
-            public string DataType { get; set; }
-            public int Length { get; set; }
-            public bool IsPrimaryKey { get; set; }
             public string Comment { get; set; }
         }
 
@@ -518,7 +510,7 @@ namespace JVDataCollector
             var metadata = new TableMetaData
             {
                 TableName = fullTableName,
-                Columns = new List<ColumnMetaData>(),
+                Columns = new List<NormalFieldDefinition>(),
                 PrimaryKeys = new List<string>(),
                 Comment = table.Comment
             };
@@ -526,46 +518,34 @@ namespace JVDataCollector
             // 親テーブルの主キーを継承
             foreach (var pk in parentPrimaryKeys)
             {
-                metadata.Columns.Add(new ColumnMetaData
-                {
-                    Name = pk.Name,
-                    DataType = "CHAR",
-                    Length = pk.Length,
-                    IsPrimaryKey = true,
-                    Comment = pk.Comment
-                });
+                metadata.Columns.Add(pk);
                 metadata.PrimaryKeys.Add(pk.Name);
             }
+
+            var currentPrimaryKeys = new List<NormalFieldDefinition>(parentPrimaryKeys);
 
             // 繰り返し番号を追加
             if (parentTableNames.Count > 0)
             {
                 string indexColumnName = $"{table.Name}_index";
-                metadata.Columns.Add(new ColumnMetaData
+                var indexColumn = new NormalFieldDefinition
                 {
                     Name = indexColumnName,
                     DataType = "INTEGER",
                     Length = 0,
                     IsPrimaryKey = true,
                     Comment = "Repeat index"
-                });
+                };
+                metadata.Columns.Add(indexColumn);
                 metadata.PrimaryKeys.Add(indexColumnName);
+                currentPrimaryKeys.Add(indexColumn);
             }
-
-            var currentPrimaryKeys = new List<NormalFieldDefinition>(parentPrimaryKeys);
 
             foreach (var field in table.Fields)
             {
                 if (field is NormalFieldDefinition normalField)
                 {
-                    metadata.Columns.Add(new ColumnMetaData
-                    {
-                        Name = normalField.Name,
-                        DataType = "CHAR",
-                        Length = normalField.Length,
-                        IsPrimaryKey = normalField.IsPrimaryKey,
-                        Comment = normalField.Comment
-                    });
+                    metadata.Columns.Add(normalField);
                     
                     if (normalField.IsPrimaryKey)
                     {
@@ -581,7 +561,7 @@ namespace JVDataCollector
             }
 
             // creation_dateカラムを追加
-            metadata.Columns.Add(new ColumnMetaData
+            metadata.Columns.Add(new NormalFieldDefinition
             {
                 Name = "creation_date",
                 DataType = "CHAR",
@@ -1773,6 +1753,1708 @@ namespace JVDataCollector
                     creationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
+            // 競走馬マスタレコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "UM",
+                    Table = new TableDefinition
+                    {
+                        Name = "horse_master",
+                        Comment = "競走馬マスタレコード: 競走馬の基本情報と血統情報、成績集計データ",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'UM' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:新規馬名登録 2:馬名変更 3:再登録(抹消後の再登録) 4:その他更新 9:抹消 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "blood_registration_number", Length = 10, IsPrimaryKey = true, Comment = "血統登録番号: 生年(西暦)4桁＋品種1桁<コード表2201.品種コード>参照＋数字5桁" },
+                            new NormalFieldDefinition { Position = 22, Name = "retirement_flag", Length = 1, IsPrimaryKey = false, Comment = "競走馬抹消区分: 0:現役 1:抹消" },
+                            new NormalFieldDefinition { Position = 23, Name = "registration_date", Length = 8, IsPrimaryKey = false, Comment = "競走馬登録年月日: 年4桁(西暦)＋月日各2桁 yyyymmdd 形式" },
+                            new NormalFieldDefinition { Position = 31, Name = "retirement_date", Length = 8, IsPrimaryKey = false, Comment = "競走馬抹消年月日: 年4桁(西暦)＋月日各2桁 yyyymmdd 形式" },
+                            new NormalFieldDefinition { Position = 39, Name = "birth_date", Length = 8, IsPrimaryKey = false, Comment = "生年月日: 年4桁(西暦)＋月日各2桁 yyyymmdd 形式" },
+                            new NormalFieldDefinition { Position = 47, Name = "horse_name", Length = 36, IsPrimaryKey = false, Comment = "馬名: 全角18文字" },
+                            new NormalFieldDefinition { Position = 83, Name = "horse_name_kana", Length = 36, IsPrimaryKey = false, Comment = "馬名半角カナ: 半角36文字" },
+                            new NormalFieldDefinition { Position = 119, Name = "horse_name_eng", Length = 60, IsPrimaryKey = false, Comment = "馬名欧字: 半角60文字" },
+                            new NormalFieldDefinition { Position = 179, Name = "jra_facility_flag", Length = 1, IsPrimaryKey = false, Comment = "JRA施設在きゅうフラグ: 0:JRA施設に在きゅうしていない 1:JRA施設の在きゅうしている (平成18年6月6日以降設定)" },
+                            new NormalFieldDefinition { Position = 180, Name = "reserve1", Length = 19, IsPrimaryKey = false, Comment = "予備" },
+                            new NormalFieldDefinition { Position = 199, Name = "horse_symbol_code", Length = 2, IsPrimaryKey = false, Comment = "馬記号コード: <コード表 2204.馬記号コード>参照" },
+                            new NormalFieldDefinition { Position = 201, Name = "sex_code", Length = 1, IsPrimaryKey = false, Comment = "性別コード: <コード表 2202.性別コード>参照" },
+                            new NormalFieldDefinition { Position = 202, Name = "breed_code", Length = 1, IsPrimaryKey = false, Comment = "品種コード: <コード表 2201.品種コード>参照" },
+                            new NormalFieldDefinition { Position = 203, Name = "coat_color_code", Length = 2, IsPrimaryKey = false, Comment = "毛色コード: <コード表 2203.毛色コード>参照" },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 205,
+                                RepeatCount = 14,
+                                Length = 46,
+                                Table = new TableDefinition
+                                {
+                                    Name = "pedigree",
+                                    Comment = "3代血統情報: 父･母･父父･父母･母父･母母･父父父･父父母･父母父･父母母･母父父･母父母･母母父･母母母の順に設定",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "breeding_registration_number", Length = 10, IsPrimaryKey = false, Comment = "繁殖登録番号: 繁殖馬マスタにリンク" },
+                                        new NormalFieldDefinition { Position = 11, Name = "horse_name", Length = 36, IsPrimaryKey = false, Comment = "馬名: 全角18文字 ～ 半角36文字（全角と半角が混在）外国の繁殖馬の場合は、16.繁殖馬マスタの10.馬名欧字の頭36バイトを設定" }
+                                    }
+                                }
+                            },
+                            new NormalFieldDefinition { Position = 849, Name = "trainer_area_code", Length = 1, IsPrimaryKey = false, Comment = "東西所属コード: <コード表 2301.東西所属コード>参照" },
+                            new NormalFieldDefinition { Position = 850, Name = "trainer_code", Length = 5, IsPrimaryKey = false, Comment = "調教師コード: 調教師マスタへリンク" },
+                            new NormalFieldDefinition { Position = 855, Name = "trainer_name_short", Length = 8, IsPrimaryKey = false, Comment = "調教師名略称: 全角4文字" },
+                            new NormalFieldDefinition { Position = 863, Name = "invitation_area_name", Length = 20, IsPrimaryKey = false, Comment = "招待地域名: 全角10文字" },
+                            new NormalFieldDefinition { Position = 883, Name = "breeder_code", Length = 8, IsPrimaryKey = false, Comment = "生産者コード: 生産者マスタへリンク" },
+                            new NormalFieldDefinition { Position = 891, Name = "breeder_name_no_corp", Length = 72, IsPrimaryKey = false, Comment = "生産者名(法人格無): 全角36文字 ～ 半角72文字（全角と半角が混在）株式会社、有限会社などの法人格を示す文字列が頭もしくは末尾にある場合にそれを削除したものを設定" },
+                            new NormalFieldDefinition { Position = 963, Name = "production_area_name", Length = 20, IsPrimaryKey = false, Comment = "産地名: 全角10文字または半角20文字（設定値が英数の場合は半角で設定）" },
+                            new NormalFieldDefinition { Position = 983, Name = "owner_code", Length = 6, IsPrimaryKey = false, Comment = "馬主コード: 馬主マスタへリンク" },
+                            new NormalFieldDefinition { Position = 989, Name = "owner_name_no_corp", Length = 64, IsPrimaryKey = false, Comment = "馬主名(法人格無): 全角32文字 ～ 半角64文字（全角と半角が混在）株式会社、有限会社などの法人格を示す文字列が頭もしくは末尾にある場合にそれを削除したものを設定" },
+                            new NormalFieldDefinition { Position = 1053, Name = "flat_main_prize_total", Length = 9, IsPrimaryKey = false, Comment = "平地本賞金累計: 単位：百円（中央の平地本賞金の合計）" },
+                            new NormalFieldDefinition { Position = 1062, Name = "obstacle_main_prize_total", Length = 9, IsPrimaryKey = false, Comment = "障害本賞金累計: 単位：百円（中央の障害本賞金の合計）" },
+                            new NormalFieldDefinition { Position = 1071, Name = "flat_additional_prize_total", Length = 9, IsPrimaryKey = false, Comment = "平地付加賞金累計: 単位：百円（中央の平地付加賞金の合計）" },
+                            new NormalFieldDefinition { Position = 1080, Name = "obstacle_additional_prize_total", Length = 9, IsPrimaryKey = false, Comment = "障害付加賞金累計: 単位：百円（中央の障害付加賞金の合計）" },
+                            new NormalFieldDefinition { Position = 1089, Name = "flat_acquired_prize_total", Length = 9, IsPrimaryKey = false, Comment = "平地収得賞金累計: 単位：百円（中央＋中央以外の平地累積収得賞金）" },
+                            new NormalFieldDefinition { Position = 1098, Name = "obstacle_acquired_prize_total", Length = 9, IsPrimaryKey = false, Comment = "障害収得賞金累計: 単位：百円（中央＋中央以外の障害累積収得賞金）" },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1107,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "total_results",
+                                    Comment = "総合着回数: 1着～5着及び着外(6着以下)の回数（中央＋地方＋海外)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1125,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "central_total_results",
+                                    Comment = "中央合計着回数: 1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1143,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "turf_straight_results",
+                                    Comment = "芝直・着回数: 芝・直線コースでの1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1161,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "turf_right_results",
+                                    Comment = "芝右・着回数: 芝・右回りコースでの1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1179,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "turf_left_results",
+                                    Comment = "芝左・着回数: 芝・左回りコースでの1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1197,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "dirt_straight_results",
+                                    Comment = "ダ直・着回数: ダート・直線コースでの1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1215,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "dirt_right_results",
+                                    Comment = "ダ右・着回数: ダート・右回りコースでの1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1233,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "dirt_left_results",
+                                    Comment = "ダ左・着回数: ダート・左回りコースでの1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1251,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "obstacle_results",
+                                    Comment = "障害・着回数: 障害レースでの1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1269,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "turf_firm_results",
+                                    Comment = "芝良・着回数: 芝・良馬場での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1287,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "turf_good_results",
+                                    Comment = "芝稍・着回数: 芝・稍重馬場での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1305,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "turf_yielding_results",
+                                    Comment = "芝重・着回数: 芝・重馬場での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1323,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "turf_soft_results",
+                                    Comment = "芝不・着回数: 芝・不良馬場での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1341,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "dirt_firm_results",
+                                    Comment = "ダ良・着回数: ダート・良馬場での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1359,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "dirt_good_results",
+                                    Comment = "ダ稍・着回数: ダート・稍重馬場での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1377,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "dirt_yielding_results",
+                                    Comment = "ダ重・着回数: ダート・重馬場での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1395,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "dirt_soft_results",
+                                    Comment = "ダ不・着回数: ダート・不良馬場での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1413,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "obstacle_firm_results",
+                                    Comment = "障良・着回数: 障害レース・良馬場での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1431,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "obstacle_good_results",
+                                    Comment = "障稍・着回数: 障害レース・稍重馬場での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1449,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "obstacle_yielding_results",
+                                    Comment = "障重・着回数: 障害レース・重馬場での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1467,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "obstacle_soft_results",
+                                    Comment = "障不・着回数: 障害レース・不良馬場での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1485,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "turf_short_results",
+                                    Comment = "芝16下・着回数: 芝･1600M以下での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1503,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "turf_medium_results",
+                                    Comment = "芝22下・着回数: 芝･1601Ｍ以上2200M以下での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1521,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "turf_long_results",
+                                    Comment = "芝22超・着回数: 芝･2201M以上での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1539,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "dirt_short_results",
+                                    Comment = "ダ16下・着回数: ダート･1600M以下での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1557,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "dirt_medium_results",
+                                    Comment = "ダ22下・着回数: ダート･1601Ｍ以上2200M以下での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1575,
+                                RepeatCount = 6,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "dirt_long_results",
+                                    Comment = "ダ22超・着回数: ダート･2201M以上での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1593,
+                                RepeatCount = 4,
+                                Length = 3,
+                                Table = new TableDefinition
+                                {
+                                    Name = "running_style_tendency",
+                                    Comment = "脚質傾向: 逃げ回数、先行回数、差し回数、追込回数を設定 過去出走レースの脚質を判定しカウントしたもの(中央レースのみ)",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "style_count", Length = 3, IsPrimaryKey = false, Comment = "脚質回数: 逃げ、先行、差し、追込の順" }
+                                    }
+                                }
+                            },
+                            new NormalFieldDefinition { Position = 1605, Name = "registered_race_count", Length = 3, IsPrimaryKey = false, Comment = "登録レース数: JRA-VANに登録されている成績レース数" }
+                        }
+                    },
+                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 騎手マスタレコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "KS",
+                    Table = new TableDefinition
+                    {
+                        Name = "jockey_master",
+                        Comment = "騎手マスタレコード: 騎手の基本情報、経歴、成績集計データ",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'KS' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:新規登録 2:更新 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "jockey_code", Length = 5, IsPrimaryKey = true, Comment = "騎手コード: 騎手の識別コード" },
+                            new NormalFieldDefinition { Position = 17, Name = "retirement_flag", Length = 1, IsPrimaryKey = false, Comment = "騎手抹消区分: 0:現役 1:抹消" },
+                            new NormalFieldDefinition { Position = 18, Name = "license_issue_date", Length = 8, IsPrimaryKey = false, Comment = "騎手免許交付年月日: 年4桁(西暦)＋月日各2桁 yyyymmdd 形式" },
+                            new NormalFieldDefinition { Position = 26, Name = "license_retirement_date", Length = 8, IsPrimaryKey = false, Comment = "騎手免許抹消年月日: 年4桁(西暦)＋月日各2桁 yyyymmdd 形式" },
+                            new NormalFieldDefinition { Position = 34, Name = "birth_date", Length = 8, IsPrimaryKey = false, Comment = "生年月日: 年4桁(西暦)＋月日各2桁 yyyymmdd 形式" },
+                            new NormalFieldDefinition { Position = 42, Name = "jockey_name", Length = 34, IsPrimaryKey = false, Comment = "騎手名: 全角17文字 姓＋全角空白1文字＋名 外国人の場合は連続17文字" },
+                            new NormalFieldDefinition { Position = 76, Name = "reserve1", Length = 34, IsPrimaryKey = false, Comment = "予備" },
+                            new NormalFieldDefinition { Position = 110, Name = "jockey_name_kana", Length = 30, IsPrimaryKey = false, Comment = "騎手名半角カナ: 半角30文字 姓15文字＋名15文字 外国人の場合は連続30文字" },
+                            new NormalFieldDefinition { Position = 140, Name = "jockey_name_short", Length = 8, IsPrimaryKey = false, Comment = "騎手名略称: 全角4文字" },
+                            new NormalFieldDefinition { Position = 148, Name = "jockey_name_eng", Length = 80, IsPrimaryKey = false, Comment = "騎手名欧字: 半角80文字 姓＋半角空白1文字＋名 フルネームで記載" },
+                            new NormalFieldDefinition { Position = 228, Name = "sex_code", Length = 1, IsPrimaryKey = false, Comment = "性別区分: 1:男性 2:女性" },
+                            new NormalFieldDefinition { Position = 229, Name = "riding_qualification_code", Length = 1, IsPrimaryKey = false, Comment = "騎乗資格コード: <コード表 2302.騎乗資格コード>参照" },
+                            new NormalFieldDefinition { Position = 230, Name = "jockey_apprentice_code", Length = 1, IsPrimaryKey = false, Comment = "騎手見習コード: <コード表 2303.騎手見習コード>参照" },
+                            new NormalFieldDefinition { Position = 231, Name = "jockey_area_code", Length = 1, IsPrimaryKey = false, Comment = "騎手東西所属コード: <コード表 2301.東西所属コード>参照" },
+                            new NormalFieldDefinition { Position = 232, Name = "invitation_area_name", Length = 20, IsPrimaryKey = false, Comment = "招待地域名: 全角10文字" },
+                            new NormalFieldDefinition { Position = 252, Name = "affiliated_trainer_code", Length = 5, IsPrimaryKey = false, Comment = "所属調教師コード: 騎手の所属厩舎の調教師コード、フリー騎手の場合はALL0を設定" },
+                            new NormalFieldDefinition { Position = 257, Name = "affiliated_trainer_name_short", Length = 8, IsPrimaryKey = false, Comment = "所属調教師名略称: 全角4文字" },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 265,
+                                RepeatCount = 2,
+                                Length = 67,
+                                Table = new TableDefinition
+                                {
+                                    Name = "first_ride_info",
+                                    Comment = "初騎乗情報: 平地初騎乗・障害初騎乗の順に設定",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "race_key_info", Length = 16, IsPrimaryKey = false, Comment = "年月日場回日R: レース詳細のキー情報" },
+                                        new NormalFieldDefinition { Position = 17, Name = "start_count", Length = 2, IsPrimaryKey = false, Comment = "出走頭数: 登録頭数から出走取消と競走除外･発走除外を除いた頭数" },
+                                        new NormalFieldDefinition { Position = 19, Name = "blood_registration_number", Length = 10, IsPrimaryKey = false, Comment = "血統登録番号: 生年(西暦)4桁＋品種1桁<コード表2201.品種コード>参照＋数字5桁" },
+                                        new NormalFieldDefinition { Position = 29, Name = "horse_name", Length = 36, IsPrimaryKey = false, Comment = "馬名: 全角18文字" },
+                                        new NormalFieldDefinition { Position = 65, Name = "final_order", Length = 2, IsPrimaryKey = false, Comment = "確定着順" },
+                                        new NormalFieldDefinition { Position = 67, Name = "abnormal_kubun_code", Length = 1, IsPrimaryKey = false, Comment = "異常区分コード: <コード表 2101.異常区分コード>参照" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 399,
+                                RepeatCount = 2,
+                                Length = 64,
+                                Table = new TableDefinition
+                                {
+                                    Name = "first_victory_info",
+                                    Comment = "初勝利情報: 平地初騎乗・障害初騎乗の順に設定",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "race_key_info", Length = 16, IsPrimaryKey = false, Comment = "年月日場回日R: レース詳細のキー情報" },
+                                        new NormalFieldDefinition { Position = 17, Name = "start_count", Length = 2, IsPrimaryKey = false, Comment = "出走頭数: 登録頭数から出走取消と競走除外･発走除外を除いた頭数" },
+                                        new NormalFieldDefinition { Position = 19, Name = "blood_registration_number", Length = 10, IsPrimaryKey = false, Comment = "血統登録番号: 生年(西暦)4桁＋品種1桁<コード表2201.品種コード>参照＋数字5桁" },
+                                        new NormalFieldDefinition { Position = 29, Name = "horse_name", Length = 36, IsPrimaryKey = false, Comment = "馬名: 全角18文字" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 527,
+                                RepeatCount = 3,
+                                Length = 163,
+                                Table = new TableDefinition
+                                {
+                                    Name = "recent_major_victory_info",
+                                    Comment = "最近重賞勝利情報: 直近の重賞勝利から順に設定",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "race_key_info", Length = 16, IsPrimaryKey = false, Comment = "年月日場回日R: レース詳細のキー情報" },
+                                        new NormalFieldDefinition { Position = 17, Name = "race_name_main", Length = 60, IsPrimaryKey = false, Comment = "競走名本題: 全角30文字" },
+                                        new NormalFieldDefinition { Position = 77, Name = "race_name_short10", Length = 20, IsPrimaryKey = false, Comment = "競走名略称10文字: 全角10文字" },
+                                        new NormalFieldDefinition { Position = 97, Name = "race_name_short6", Length = 12, IsPrimaryKey = false, Comment = "競走名略称6文字: 全角6文字" },
+                                        new NormalFieldDefinition { Position = 109, Name = "race_name_short3", Length = 6, IsPrimaryKey = false, Comment = "競走名略称3文字: 全角3文字" },
+                                        new NormalFieldDefinition { Position = 115, Name = "grade_code", Length = 1, IsPrimaryKey = false, Comment = "グレードコード: <コード表 2003.グレードコード>参照" },
+                                        new NormalFieldDefinition { Position = 116, Name = "start_count", Length = 2, IsPrimaryKey = false, Comment = "出走頭数: 登録頭数から出走取消と競走除外･発走除外を除いた頭数" },
+                                        new NormalFieldDefinition { Position = 118, Name = "blood_registration_number", Length = 10, IsPrimaryKey = false, Comment = "血統登録番号: 生年(西暦)4桁＋品種1桁<コード表2201.品種コード>参照＋数字5桁" },
+                                        new NormalFieldDefinition { Position = 128, Name = "horse_name", Length = 36, IsPrimaryKey = false, Comment = "馬名: 全角18文字" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 1016,
+                                RepeatCount = 3,
+                                Length = 1052,
+                                Table = new TableDefinition
+                                {
+                                    Name = "performance_info",
+                                    Comment = "本年･前年･累計成績情報: 現役騎手については本年・前年・累計の順に設定、引退騎手については引退年、引退前年・累計の順に設定",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "target_year", Length = 4, IsPrimaryKey = false, Comment = "設定年: 成績情報に設定されている年度(西暦)" },
+                                        new NormalFieldDefinition { Position = 5, Name = "flat_main_prize_total", Length = 10, IsPrimaryKey = false, Comment = "平地本賞金合計: 単位：百円（中央の平地本賞金の合計）" },
+                                        new NormalFieldDefinition { Position = 15, Name = "obstacle_main_prize_total", Length = 10, IsPrimaryKey = false, Comment = "障害本賞金合計: 単位：百円（中央の障害本賞金の合計）" },
+                                        new NormalFieldDefinition { Position = 25, Name = "flat_additional_prize_total", Length = 10, IsPrimaryKey = false, Comment = "平地付加賞金合計: 単位：百円（中央の平地付加賞金の合計）" },
+                                        new NormalFieldDefinition { Position = 35, Name = "obstacle_additional_prize_total", Length = 10, IsPrimaryKey = false, Comment = "障害付加賞金合計: 単位：百円（中央の障害付加賞金の合計）" },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 45,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "flat_results",
+                                                Comment = "平地着回数: 1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 81,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "obstacle_results",
+                                                Comment = "障害着回数: 1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        // 競馬場別着回数 (各競馬場×平地・障害)
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 117,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "sapporo_flat_results",
+                                                Comment = "札幌平地着回数: 札幌競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 153,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "sapporo_obstacle_results",
+                                                Comment = "札幌障害着回数: 札幌競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 189,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "hakodate_flat_results",
+                                                Comment = "函館平地着回数: 函館競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 225,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "hakodate_obstacle_results",
+                                                Comment = "函館障害着回数: 函館競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 261,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "fukushima_flat_results",
+                                                Comment = "福島平地着回数: 福島競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 297,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "fukushima_obstacle_results",
+                                                Comment = "福島障害着回数: 福島競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 333,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "niigata_flat_results",
+                                                Comment = "新潟平地着回数: 新潟競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 369,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "niigata_obstacle_results",
+                                                Comment = "新潟障害着回数: 新潟競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 405,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "tokyo_flat_results",
+                                                Comment = "東京平地着回数: 東京競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 441,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "tokyo_obstacle_results",
+                                                Comment = "東京障害着回数: 東京競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 477,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "nakayama_flat_results",
+                                                Comment = "中山平地着回数: 中山競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 513,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "nakayama_obstacle_results",
+                                                Comment = "中山障害着回数: 中山競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 549,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "chukyo_flat_results",
+                                                Comment = "中京平地着回数: 中京競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 585,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "chukyo_obstacle_results",
+                                                Comment = "中京障害着回数: 中京競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 621,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "kyoto_flat_results",
+                                                Comment = "京都平地着回数: 京都競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 657,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "kyoto_obstacle_results",
+                                                Comment = "京都障害着回数: 京都競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 693,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "hanshin_flat_results",
+                                                Comment = "阪神平地着回数: 阪神競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 729,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "hanshin_obstacle_results",
+                                                Comment = "阪神障害着回数: 阪神競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 765,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "kokura_flat_results",
+                                                Comment = "小倉平地着回数: 小倉競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 801,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "kokura_obstacle_results",
+                                                Comment = "小倉障害着回数: 小倉競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        // 距離別着回数
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 837,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "turf_short_results",
+                                                Comment = "芝16下・着回数: 芝･1600M以下での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 873,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "turf_medium_results",
+                                                Comment = "芝22下・着回数: 芝･1601Ｍ以上2200M以下での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 909,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "turf_long_results",
+                                                Comment = "芝22超・着回数: 芝･2201M以上での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 945,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "dirt_short_results",
+                                                Comment = "ダ16下・着回数: ダート･1600M以下での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 981,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "dirt_medium_results",
+                                                Comment = "ダ22下・着回数: ダート･1601Ｍ以上2200M以下での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 1017,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "dirt_long_results",
+                                                Comment = "ダ22超・着回数: ダート･2201M以上での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 調教師マスタレコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "CH",
+                    Table = new TableDefinition
+                    {
+                        Name = "trainer_master",
+                        Comment = "調教師マスタレコード: 調教師の基本情報、経歴、成績集計データ",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'CH' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:新規登録 2:更新 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "trainer_code", Length = 5, IsPrimaryKey = true, Comment = "調教師コード: 調教師の識別コード" },
+                            new NormalFieldDefinition { Position = 17, Name = "retirement_flag", Length = 1, IsPrimaryKey = false, Comment = "調教師抹消区分: 0:現役 1:抹消" },
+                            new NormalFieldDefinition { Position = 18, Name = "license_issue_date", Length = 8, IsPrimaryKey = false, Comment = "調教師免許交付年月日: 年4桁(西暦)＋月日各2桁 yyyymmdd 形式" },
+                            new NormalFieldDefinition { Position = 26, Name = "license_retirement_date", Length = 8, IsPrimaryKey = false, Comment = "調教師免許抹消年月日: 年4桁(西暦)＋月日各2桁 yyyymmdd 形式" },
+                            new NormalFieldDefinition { Position = 34, Name = "birth_date", Length = 8, IsPrimaryKey = false, Comment = "生年月日: 年4桁(西暦)＋月日各2桁 yyyymmdd 形式" },
+                            new NormalFieldDefinition { Position = 42, Name = "trainer_name", Length = 34, IsPrimaryKey = false, Comment = "調教師名: 全角17文字 姓＋全角空白1文字＋名 外国人の場合は連続17文字" },
+                            new NormalFieldDefinition { Position = 76, Name = "trainer_name_kana", Length = 30, IsPrimaryKey = false, Comment = "調教師名半角カナ: 半角30文字 姓15文字＋名15文字 外国人の場合は連続30文字" },
+                            new NormalFieldDefinition { Position = 106, Name = "trainer_name_short", Length = 8, IsPrimaryKey = false, Comment = "調教師名略称: 全角4文字" },
+                            new NormalFieldDefinition { Position = 114, Name = "trainer_name_eng", Length = 80, IsPrimaryKey = false, Comment = "調教師名欧字: 半角80文字 姓＋半角空白1文字＋名 フルネームで記載" },
+                            new NormalFieldDefinition { Position = 194, Name = "sex_code", Length = 1, IsPrimaryKey = false, Comment = "性別区分: 1:男性 2:女性" },
+                            new NormalFieldDefinition { Position = 195, Name = "trainer_area_code", Length = 1, IsPrimaryKey = false, Comment = "調教師東西所属コード: <コード表 2301.東西所属コード>参照" },
+                            new NormalFieldDefinition { Position = 196, Name = "invitation_area_name", Length = 20, IsPrimaryKey = false, Comment = "招待地域名: 全角10文字" },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 216,
+                                RepeatCount = 3,
+                                Length = 163,
+                                Table = new TableDefinition
+                                {
+                                    Name = "recent_major_victory_info",
+                                    Comment = "最近重賞勝利情報: 直近の重賞勝利から順に設定",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "race_key_info", Length = 16, IsPrimaryKey = false, Comment = "年月日場回日R: レース詳細のキー情報" },
+                                        new NormalFieldDefinition { Position = 17, Name = "race_name_main", Length = 60, IsPrimaryKey = false, Comment = "競走名本題: 全角30文字" },
+                                        new NormalFieldDefinition { Position = 77, Name = "race_name_short10", Length = 20, IsPrimaryKey = false, Comment = "競走名略称10文字: 全角10文字" },
+                                        new NormalFieldDefinition { Position = 97, Name = "race_name_short6", Length = 12, IsPrimaryKey = false, Comment = "競走名略称6文字: 全角6文字" },
+                                        new NormalFieldDefinition { Position = 109, Name = "race_name_short3", Length = 6, IsPrimaryKey = false, Comment = "競走名略称3文字: 全角3文字" },
+                                        new NormalFieldDefinition { Position = 115, Name = "grade_code", Length = 1, IsPrimaryKey = false, Comment = "グレードコード: <コード表 2003.グレードコード>参照" },
+                                        new NormalFieldDefinition { Position = 116, Name = "start_count", Length = 2, IsPrimaryKey = false, Comment = "出走頭数: 登録頭数から出走取消と競走除外･発走除外を除いた頭数" },
+                                        new NormalFieldDefinition { Position = 118, Name = "blood_registration_number", Length = 10, IsPrimaryKey = false, Comment = "血統登録番号: 生年(西暦)4桁＋品種1桁<コード表2201.品種コード>参照＋数字5桁" },
+                                        new NormalFieldDefinition { Position = 128, Name = "horse_name", Length = 36, IsPrimaryKey = false, Comment = "馬名: 全角18文字" }
+                                    }
+                                }
+                            },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 705,
+                                RepeatCount = 3,
+                                Length = 1052,
+                                Table = new TableDefinition
+                                {
+                                    Name = "performance_info",
+                                    Comment = "本年･前年･累計成績情報: 現役調教師については本年・前年・累計の順に設定、引退調教師については引退年、引退前年・累計の順に設定",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "target_year", Length = 4, IsPrimaryKey = false, Comment = "設定年: 成績情報に設定されている年度(西暦)" },
+                                        new NormalFieldDefinition { Position = 5, Name = "flat_main_prize_total", Length = 10, IsPrimaryKey = false, Comment = "平地本賞金合計: 単位：百円（中央の平地本賞金の合計）" },
+                                        new NormalFieldDefinition { Position = 15, Name = "obstacle_main_prize_total", Length = 10, IsPrimaryKey = false, Comment = "障害本賞金合計: 単位：百円（中央の障害本賞金の合計）" },
+                                        new NormalFieldDefinition { Position = 25, Name = "flat_additional_prize_total", Length = 10, IsPrimaryKey = false, Comment = "平地付加賞金合計: 単位：百円（中央の平地付加賞金の合計）" },
+                                        new NormalFieldDefinition { Position = 35, Name = "obstacle_additional_prize_total", Length = 10, IsPrimaryKey = false, Comment = "障害付加賞金合計: 単位：百円（中央の障害付加賞金の合計）" },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 45,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "flat_results",
+                                                Comment = "平地着回数: 1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 81,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "obstacle_results",
+                                                Comment = "障害着回数: 1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        // 競馬場別着回数 (各競馬場×平地・障害)
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 117,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "sapporo_flat_results",
+                                                Comment = "札幌平地着回数: 札幌競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 153,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "sapporo_obstacle_results",
+                                                Comment = "札幌障害着回数: 札幌競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 189,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "hakodate_flat_results",
+                                                Comment = "函館平地着回数: 函館競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 225,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "hakodate_obstacle_results",
+                                                Comment = "函館障害着回数: 函館競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 261,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "fukushima_flat_results",
+                                                Comment = "福島平地着回数: 福島競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 297,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "fukushima_obstacle_results",
+                                                Comment = "福島障害着回数: 福島競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 333,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "niigata_flat_results",
+                                                Comment = "新潟平地着回数: 新潟競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 369,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "niigata_obstacle_results",
+                                                Comment = "新潟障害着回数: 新潟競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 405,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "tokyo_flat_results",
+                                                Comment = "東京平地着回数: 東京競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 441,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "tokyo_obstacle_results",
+                                                Comment = "東京障害着回数: 東京競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 477,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "nakayama_flat_results",
+                                                Comment = "中山平地着回数: 中山競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 513,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "nakayama_obstacle_results",
+                                                Comment = "中山障害着回数: 中山競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 549,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "chukyo_flat_results",
+                                                Comment = "中京平地着回数: 中京競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 585,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "chukyo_obstacle_results",
+                                                Comment = "中京障害着回数: 中京競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 621,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "kyoto_flat_results",
+                                                Comment = "京都平地着回数: 京都競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 657,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "kyoto_obstacle_results",
+                                                Comment = "京都障害着回数: 京都競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 693,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "hanshin_flat_results",
+                                                Comment = "阪神平地着回数: 阪神競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 729,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "hanshin_obstacle_results",
+                                                Comment = "阪神障害着回数: 阪神競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 765,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "kokura_flat_results",
+                                                Comment = "小倉平地着回数: 小倉競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 801,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "kokura_obstacle_results",
+                                                Comment = "小倉障害着回数: 小倉競馬場での1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        // 距離別着回数
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 837,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "turf_short_results",
+                                                Comment = "芝16下・着回数: 芝･1600M以下での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 873,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "turf_medium_results",
+                                                Comment = "芝22下・着回数: 芝･1601Ｍ以上2200M以下での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 909,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "turf_long_results",
+                                                Comment = "芝22超・着回数: 芝･2201M以上での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 945,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "dirt_short_results",
+                                                Comment = "ダ16下・着回数: ダート･1600M以下での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 981,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "dirt_medium_results",
+                                                Comment = "ダ22下・着回数: ダート･1601Ｍ以上2200M以下での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 1017,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "dirt_long_results",
+                                                Comment = "ダ22超・着回数: ダート･2201M以上での1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 生産者マスタレコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "BR",
+                    Table = new TableDefinition
+                    {
+                        Name = "breeder_master",
+                        Comment = "生産者マスタレコード: 生産者の基本情報と成績集計データ",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'BR' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:新規登録 2:更新 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "breeder_code", Length = 8, IsPrimaryKey = true, Comment = "生産者コード: 生産者の識別コード" },
+                            new NormalFieldDefinition { Position = 20, Name = "breeder_name_with_corp", Length = 72, IsPrimaryKey = false, Comment = "生産者名(法人格有): 全角36文字 ～ 半角72文字（全角と半角が混在）外国生産者の場合は、生産者名欧字の頭70バイトを設定" },
+                            new NormalFieldDefinition { Position = 92, Name = "breeder_name_no_corp", Length = 72, IsPrimaryKey = false, Comment = "生産者名(法人格無): 全角36文字 ～ 半角72文字（全角と半角が混在）株式会社、有限会社などの法人格を示す文字列が頭もしくは末尾にある場合にそれを削除したものを設定。また、外国生産者の場合は、生産者名欧字の頭70バイトを設定" },
+                            new NormalFieldDefinition { Position = 164, Name = "breeder_name_kana", Length = 72, IsPrimaryKey = false, Comment = "生産者名半角カナ: 半角72文字 日本語半角カナを設定(半角カナ以外の文字は設定しない) 外国生産者については設定しない" },
+                            new NormalFieldDefinition { Position = 236, Name = "breeder_name_eng", Length = 168, IsPrimaryKey = false, Comment = "生産者名欧字: 全角84文字 ～ 半角168文字(全角と半角が混在) アルファベット等以外の特殊文字については、全角で設定" },
+                            new NormalFieldDefinition { Position = 404, Name = "address_locality_name", Length = 20, IsPrimaryKey = false, Comment = "生産者住所自治省名: 全角10文字 生産者の所在地を示す" },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 424,
+                                RepeatCount = 2,
+                                Length = 60,
+                                Table = new TableDefinition
+                                {
+                                    Name = "performance_info",
+                                    Comment = "本年･累計成績情報: 本年・累計の順に設定",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "target_year", Length = 4, IsPrimaryKey = false, Comment = "設定年: 成績情報に設定されている年度(西暦)" },
+                                        new NormalFieldDefinition { Position = 5, Name = "main_prize_total", Length = 10, IsPrimaryKey = false, Comment = "本賞金合計: 単位：百円（中央の本賞金の合計）" },
+                                        new NormalFieldDefinition { Position = 15, Name = "additional_prize_total", Length = 10, IsPrimaryKey = false, Comment = "付加賞金合計: 単位：百円（中央の付加賞金の合計）" },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 25,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "results",
+                                                Comment = "着回数: 1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 馬主マスタレコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "BN",
+                    Table = new TableDefinition
+                    {
+                        Name = "owner_master",
+                        Comment = "馬主マスタレコード: 馬主の基本情報と成績集計データ",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'BN' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:新規登録 2:更新 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "owner_code", Length = 6, IsPrimaryKey = true, Comment = "馬主コード: 馬主の識別コード" },
+                            new NormalFieldDefinition { Position = 18, Name = "owner_name_with_corp", Length = 64, IsPrimaryKey = false, Comment = "馬主名(法人格有): 全角32文字 ～ 半角64文字（全角と半角が混在）外国馬主の場合は、馬主名欧字の頭64バイトを設定" },
+                            new NormalFieldDefinition { Position = 82, Name = "owner_name_no_corp", Length = 64, IsPrimaryKey = false, Comment = "馬主名(法人格無): 全角32文字 ～ 半角64文字（全角と半角が混在）株式会社、有限会社などの法人格を示す文字列が頭もしくは末尾にある場合にそれを削除したものを設定。また、外国馬主の場合は、馬主名欧字の頭64バイトを設定" },
+                            new NormalFieldDefinition { Position = 146, Name = "owner_name_kana", Length = 50, IsPrimaryKey = false, Comment = "馬主名半角カナ: 半角50文字 日本語半角カナを設定(半角カナ以外の文字は設定しない) 外国馬主については設定しない" },
+                            new NormalFieldDefinition { Position = 196, Name = "owner_name_eng", Length = 100, IsPrimaryKey = false, Comment = "馬主名欧字: 全角50文字 ～ 半角100文字（全角と半角が混在）アルファベット等以外の特殊文字については、全角で設定" },
+                            new NormalFieldDefinition { Position = 296, Name = "racing_color", Length = 60, IsPrimaryKey = false, Comment = "服色標示: 全角30文字 馬主毎に指定される騎手の勝負服の色・模様を示す（レーシングプログラムに記載されているもの）例：「水色，赤山形一本輪，水色袖」" },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 356,
+                                RepeatCount = 2,
+                                Length = 60,
+                                Table = new TableDefinition
+                                {
+                                    Name = "performance_info",
+                                    Comment = "本年･累計成績情報: 本年・累計の順に設定",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "target_year", Length = 4, IsPrimaryKey = false, Comment = "設定年: 成績情報に設定されている年度(西暦)" },
+                                        new NormalFieldDefinition { Position = 5, Name = "main_prize_total", Length = 10, IsPrimaryKey = false, Comment = "本賞金合計: 単位：百円（中央の本賞金の合計）" },
+                                        new NormalFieldDefinition { Position = 15, Name = "additional_prize_total", Length = 10, IsPrimaryKey = false, Comment = "付加賞金合計: 単位：百円（中央の付加賞金の合計）" },
+                                        new RepeatFieldDefinition
+                                        {
+                                            Position = 25,
+                                            RepeatCount = 6,
+                                            Length = 6,
+                                            Table = new TableDefinition
+                                            {
+                                                Name = "results",
+                                                Comment = "着回数: 1着～5着及び着外(6着以下)の回数（中央のみ)",
+                                                Fields = new List<FieldDefinition>
+                                                {
+                                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 繁殖馬マスタレコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "HN",
+                    Table = new TableDefinition
+                    {
+                        Name = "breeding_horse_master",
+                        Comment = "繁殖馬マスタレコード: 繁殖馬の基本情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'HN' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:新規登録 2:更新 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "breeding_registration_number", Length = 10, IsPrimaryKey = true, Comment = "繁殖登録番号: 同一馬で、繁殖登録番号が複数ある場合がある" },
+                            new NormalFieldDefinition { Position = 22, Name = "reserve1", Length = 8, IsPrimaryKey = false, Comment = "予備" },
+                            new NormalFieldDefinition { Position = 30, Name = "blood_registration_number", Length = 10, IsPrimaryKey = false, Comment = "血統登録番号: 外国の繁殖馬等の理由で血統登録番号が初期値の場合がある" },
+                            new NormalFieldDefinition { Position = 40, Name = "reserve2", Length = 1, IsPrimaryKey = false, Comment = "予備: \"0\"を設定" },
+                            new NormalFieldDefinition { Position = 41, Name = "horse_name", Length = 36, IsPrimaryKey = false, Comment = "馬名: 全角18文字 ～ 半角36文字（全角と半角が混在）外国の繁殖馬の場合は、10.馬名欧字の頭36バイトを設定" },
+                            new NormalFieldDefinition { Position = 77, Name = "horse_name_kana", Length = 40, IsPrimaryKey = false, Comment = "馬名半角カナ: 半角40文字 日本語半角カナを設定(半角カナ以外の文字は設定しない) 外国繁殖馬については設定しない" },
+                            new NormalFieldDefinition { Position = 117, Name = "horse_name_eng", Length = 80, IsPrimaryKey = false, Comment = "馬名欧字: 全角40文字 ～ 半角80文字(全角と半角が混在) アルファベット等以外の特殊文字については、全角で設定" },
+                            new NormalFieldDefinition { Position = 197, Name = "birth_year", Length = 4, IsPrimaryKey = false, Comment = "生年: 西暦4桁" },
+                            new NormalFieldDefinition { Position = 201, Name = "sex_code", Length = 1, IsPrimaryKey = false, Comment = "性別コード: <コード表 2202.性別コード>参照" },
+                            new NormalFieldDefinition { Position = 202, Name = "breed_code", Length = 1, IsPrimaryKey = false, Comment = "品種コード: <コード表 2201.品種コード>参照" },
+                            new NormalFieldDefinition { Position = 203, Name = "coat_color_code", Length = 2, IsPrimaryKey = false, Comment = "毛色コード: <コード表 2203.毛色コード>参照" },
+                            new NormalFieldDefinition { Position = 205, Name = "breeding_horse_kubun", Length = 1, IsPrimaryKey = false, Comment = "繁殖馬持込区分: 0:内国産 1:持込 2:輸入内国産扱い 3:輸入 9:その他" },
+                            new NormalFieldDefinition { Position = 206, Name = "import_year", Length = 4, IsPrimaryKey = false, Comment = "輸入年: 西暦4桁" },
+                            new NormalFieldDefinition { Position = 210, Name = "production_area_name", Length = 20, IsPrimaryKey = false, Comment = "産地名: 全角10文字" },
+                            new NormalFieldDefinition { Position = 230, Name = "father_breeding_registration_number", Length = 10, IsPrimaryKey = false, Comment = "父馬繁殖登録番号" },
+                            new NormalFieldDefinition { Position = 240, Name = "mother_breeding_registration_number", Length = 10, IsPrimaryKey = false, Comment = "母馬繁殖登録番号" }
+                        }
+                    },
+                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+                
+            // 産駒マスタレコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "SK",
+                    Table = new TableDefinition
+                    {
+                        Name = "offspring_master",
+                        Comment = "産駒マスタレコード: 産駒の基本情報と血統情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'SK' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:新規登録 2:更新 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "blood_registration_number", Length = 10, IsPrimaryKey = true, Comment = "血統登録番号: 生年(西暦)4桁＋品種1桁＋数字5桁" },
+                            new NormalFieldDefinition { Position = 22, Name = "birth_date", Length = 8, IsPrimaryKey = false, Comment = "生年月日: 年4桁(西暦)＋月日各2桁 yyyymmdd 形式" },
+                            new NormalFieldDefinition { Position = 30, Name = "sex_code", Length = 1, IsPrimaryKey = false, Comment = "性別コード: <コード表 2202.性別コード>参照" },
+                            new NormalFieldDefinition { Position = 31, Name = "breed_code", Length = 1, IsPrimaryKey = false, Comment = "品種コード: <コード表 2201.品種コード>参照" },
+                            new NormalFieldDefinition { Position = 32, Name = "coat_color_code", Length = 2, IsPrimaryKey = false, Comment = "毛色コード: <コード表 2203.毛色コード>参照" },
+                            new NormalFieldDefinition { Position = 34, Name = "offspring_import_kubun", Length = 1, IsPrimaryKey = false, Comment = "産駒持込区分: 0:内国産 1:持込 2:輸入内国産扱い 3:輸入" },
+                            new NormalFieldDefinition { Position = 35, Name = "import_year", Length = 4, IsPrimaryKey = false, Comment = "輸入年: 西暦4桁" },
+                            new NormalFieldDefinition { Position = 39, Name = "breeder_code", Length = 8, IsPrimaryKey = false, Comment = "生産者コード: 生産者マスタにリンク" },
+                            new NormalFieldDefinition { Position = 47, Name = "production_area_name", Length = 20, IsPrimaryKey = false, Comment = "産地名: 全角10文字" },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 67,
+                                RepeatCount = 14,
+                                Length = 10,
+                                Table = new TableDefinition
+                                {
+                                    Name = "pedigree",
+                                    Comment = "3代血統情報: 父･母･父父･父母･母父･母母･父父父･父父母･父母父･父母母･母父父･母父母･母母父･母母母の順に設定",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "breeding_registration_number", Length = 10, IsPrimaryKey = false, Comment = "繁殖登録番号: 繁殖馬マスタにリンク" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
         }
     }
 }
