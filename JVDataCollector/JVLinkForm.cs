@@ -60,7 +60,7 @@ namespace JVDataCollector
         private List<RecordDefinition> recordDefinitions = new List<RecordDefinition>();
         private Dictionary<string, Dictionary<string, Dictionary<string, Object>>> buffers;
         private List<TableMetaData> tableMetaData = new List<TableMetaData>();
-        private int batchSize = 100000;
+        private int batchSize = 50000;
 
         public JVLinkForm(string[] args)
         {
