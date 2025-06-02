@@ -17,7 +17,7 @@ namespace JVDataCollector
         {
             public string RecordTypeId { get; set; }
             public TableDefinition Table { get; set; }
-            public FieldDefinition creationDateField { get; set; }
+            public FieldDefinition CreationDateField { get; set; }
         }
 
         public class TableDefinition
@@ -55,12 +55,12 @@ namespace JVDataCollector
             public string Comment { get; set; }
         }
 
-        private string[] commandLineArgs;
-        private string connectionString = "Host=localhost;Database=horgues3;Username=postgres;Password=postgres";
-        private List<RecordDefinition> recordDefinitions = new List<RecordDefinition>();
-        private Dictionary<string, Dictionary<string, Dictionary<string, Object>>> buffers;
-        private List<TableMetaData> tableMetaData = new List<TableMetaData>();
-        private int batchSize = 50000;
+        private readonly string[] commandLineArgs;
+        private const string connectionString = "Host=localhost;Database=horgues3;Username=postgres;Password=postgres";
+        private readonly List<RecordDefinition> recordDefinitions = new List<RecordDefinition>();
+        private readonly Dictionary<string, Dictionary<string, Dictionary<string, Object>>> buffers = new Dictionary<string, Dictionary<string, Dictionary<string, Object>>>();
+        private readonly List<TableMetaData> tableMetaData = new List<TableMetaData>();
+        private const int batchSize = 50000;
 
         public JVLinkForm(string[] args)
         {
@@ -125,9 +125,8 @@ namespace JVDataCollector
 
             int result;
             int filesToRead = 0, filesToDownload = 0;
-            string lastFileTimestamp;
 
-            result = axJVLink1.JVOpen(dataSpec, fromTime, option, ref filesToRead, ref filesToDownload, out lastFileTimestamp);
+            result = axJVLink1.JVOpen(dataSpec, fromTime, option, ref filesToRead, ref filesToDownload, out string lastFileTimestamp);
             if (result != 0)
             {
                 throw new InvalidOperationException($"JVOpen ({dataSpec}) failed with error code: {result}");
@@ -139,6 +138,7 @@ namespace JVDataCollector
             Console.WriteLine($"  LastFileTimestamp: {lastFileTimestamp}");
 
             // JVStatusでダウンロード進捗を監視
+            Console.WriteLine("Starting data download...");
             result = 0;
             int previousResult = -1;
 
@@ -156,7 +156,7 @@ namespace JVDataCollector
                 // ダウンロード済みファイル数が変化したときのみコンソール出力
                 if (result != previousResult)
                 {
-                    Console.WriteLine($"Downloaded files: {result}/{filesToDownload}");
+                    Console.WriteLine($"  Downloaded files: {result}/{filesToDownload}");
                     previousResult = result;
                 }
             }
@@ -174,12 +174,12 @@ namespace JVDataCollector
 
                 while (true)
                 {
-                    string buff;
-                    string filename;
+#pragma warning disable IDE0018 // インライン変数宣言
                     int size = 110000;
+#pragma warning restore IDE0018 // インライン変数宣言
 
                     // JVReadでデータを読み込み
-                    result = axJVLink1.JVRead(out buff, out size, out filename);
+                    result = axJVLink1.JVRead(out string buff, out size, out string filename);
 
                     if (result == 0)
                     {
@@ -191,7 +191,7 @@ namespace JVDataCollector
                     {
                         // ファイル切り替わり
                         totalFiles++;
-                        Console.WriteLine($"File completed: {filename.Trim()} (File {totalFiles})");
+                        Console.WriteLine($"  File completed: {filename.Trim()} (File {totalFiles})");
                         continue;
                     }
                     else if (result > 0)
@@ -213,12 +213,47 @@ namespace JVDataCollector
                 // バッファに残っているデータをフラッシュ
                 FlushAllBuffers(connection);
 
-                // TODO: lastFileTimestamp をデータベースに保存する
-
+                // lastFileTimestampをデータベースに保存
+                UpdateLastFileTimestamp(connection, lastFileTimestamp);
             }
 
             axJVLink1.JVClose();
             Console.WriteLine($"JV data processing completed.");
+        }
+
+        private void UpdateLastFileTimestamp(NpgsqlConnection connection, string lastFileTimestamp)
+        {
+            // 空文字列または無効な値の場合はスキップ
+            if (string.IsNullOrWhiteSpace(lastFileTimestamp) || lastFileTimestamp.Length != 14)
+            {
+                Console.WriteLine($"Invalid lastFileTimestamp: {lastFileTimestamp}. Skipping update.");
+                return;
+            }
+
+            // lastFileTimestampを更新または挿入（既存の値より新しい場合のみ）
+            var upsertSql = @"
+                INSERT INTO last_file_timestamp (id, last_file_timestamp, updated_at)
+                VALUES (1, @lastFileTimestamp, CURRENT_TIMESTAMP)
+                ON CONFLICT (id)
+                DO UPDATE SET 
+                    last_file_timestamp = EXCLUDED.last_file_timestamp,
+                    updated_at = EXCLUDED.updated_at
+                WHERE EXCLUDED.last_file_timestamp > last_file_timestamp.last_file_timestamp";
+
+            using (var command = new NpgsqlCommand(upsertSql, connection))
+            {
+                command.Parameters.AddWithValue("@lastFileTimestamp", lastFileTimestamp);
+                int rowsAffected = command.ExecuteNonQuery();
+
+                if (rowsAffected > 0)
+                {
+                    Console.WriteLine($"LastFileTimestamp updated: {lastFileTimestamp}");
+                }
+                else
+                {
+                    Console.WriteLine($"LastFileTimestamp not updated (existing value is newer): {lastFileTimestamp}");
+                }
+            }
         }
 
         private void ProcessRecord(byte[] recordData, NpgsqlConnection connection)
@@ -234,7 +269,7 @@ namespace JVDataCollector
                 return;
             }
 
-            string creationDate = System.Text.Encoding.GetEncoding("Shift_JIS").GetString(recordData, recordDefinition.creationDateField.Position - 1, recordDefinition.creationDateField.Length);
+            string creationDate = System.Text.Encoding.GetEncoding("Shift_JIS").GetString(recordData, recordDefinition.CreationDateField.Position - 1, recordDefinition.CreationDateField.Length);
 
             ProcessTablesRecursive(recordData, recordDefinition.Table, creationDate, new Dictionary<string, Object>(), new List<string>(), connection);
         }
@@ -574,6 +609,30 @@ namespace JVDataCollector
             Console.WriteLine($"  Table metadata created: {fullTableName}");
         }
 
+        private void CreateLastFileTimestampTable(NpgsqlConnection connection)
+        {
+            var createTableSql = @"
+                CREATE TABLE IF NOT EXISTS last_file_timestamp (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    last_file_timestamp CHAR(14) NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT single_row_check CHECK (id = 1)
+                )";
+
+            using (var command = new NpgsqlCommand(createTableSql, connection))
+            {
+                command.ExecuteNonQuery();
+            }
+
+            var commentSql = "COMMENT ON TABLE last_file_timestamp IS 'JVOpenで取得したlastFileTimestampを管理するテーブル'";
+            using (var commentCommand = new NpgsqlCommand(commentSql, connection))
+            {
+                commentCommand.ExecuteNonQuery();
+            }
+
+            Console.WriteLine("  Table created: last_file_timestamp");
+        }
+
         private void CreateTables()
         {
             Console.WriteLine("Creating database tables...");
@@ -582,6 +641,10 @@ namespace JVDataCollector
             {
                 connection.Open();
 
+                // lastFileTimestamp管理テーブルの作成
+                CreateLastFileTimestampTable(connection);
+
+                // テーブルメタデータに基づいたテーブルの作成
                 foreach (var metadata in tableMetaData)
                 {
                     // 既存のテーブルを削除
@@ -637,7 +700,7 @@ namespace JVDataCollector
                         }
                     }
 
-                    Console.WriteLine($"Table '{metadata.TableName}' created.");
+                    Console.WriteLine($"  Table '{metadata.TableName}' created.");
                 }
             }
 
@@ -653,7 +716,6 @@ namespace JVDataCollector
         {
             Console.WriteLine("Initializing data buffers...");
             
-            buffers = new Dictionary<string, Dictionary<string, Dictionary<string, Object>>>();
             foreach (var recordDef in recordDefinitions)
             {
                 buffers[recordDef.Table.Name] = new Dictionary<string, Dictionary<string, Object>>();
@@ -751,7 +813,7 @@ namespace JVDataCollector
                             }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // レース詳細レコード定義
@@ -909,7 +971,7 @@ namespace JVDataCollector
                             new NormalFieldDefinition { Position = 1270, Name = "record_update_kubun", Length = 1, IsPrimaryKey = false, Comment = "レコード更新区分: 0:初期値 1:基準タイムとなったレース 2:コースレコードを更新したレース" }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // 馬毎レース情報レコード定義
@@ -1007,7 +1069,7 @@ namespace JVDataCollector
                             new NormalFieldDefinition { Position = 553, Name = "running_style_judgment", Length = 1, IsPrimaryKey = false, Comment = "今回レース脚質判定: 1:逃 2:先 3:差 4:追 0:初期値" }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // 払戻レコード定義
@@ -1216,7 +1278,7 @@ namespace JVDataCollector
                             }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // 票数１レコード定義
@@ -1386,7 +1448,7 @@ namespace JVDataCollector
                             new NormalFieldDefinition { Position = 28943, Name = "sanrenpuku_refund_votes", Length = 11, IsPrimaryKey = false, Comment = "3連複返還票数合計: 単位百円 3連複返還分票数の合計（合計票数から引くことで有効票数が求まる）" }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // 票数6（3連単）レコード定義
@@ -1433,7 +1495,7 @@ namespace JVDataCollector
                             new NormalFieldDefinition { Position = 102878, Name = "sanrentan_refund_votes", Length = 11, IsPrimaryKey = false, Comment = "3連単返還票数合計: 単位百円 3連単返還分票数の合計（合計票数から引くことで有効票数が求まる）" }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // オッズ1（単複枠）レコード定義
@@ -1519,7 +1581,7 @@ namespace JVDataCollector
                             new NormalFieldDefinition { Position = 950, Name = "wakuren_total_votes", Length = 11, IsPrimaryKey = false, Comment = "枠連票数合計: 単位百円 枠連票数の合計（返還分票数を含む）" }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // オッズ2（馬連）レコード定義
@@ -1565,7 +1627,7 @@ namespace JVDataCollector
                             new NormalFieldDefinition { Position = 2030, Name = "umaren_total_votes", Length = 11, IsPrimaryKey = false, Comment = "馬連票数合計: 単位百円 馬連票数の合計（返還分票数を含む）" }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // オッズ3（ワイド）レコード定義
@@ -1612,7 +1674,7 @@ namespace JVDataCollector
                             new NormalFieldDefinition { Position = 2642, Name = "wide_total_votes", Length = 11, IsPrimaryKey = false, Comment = "ワイド票数合計: 単位百円 ワイド票数の合計（返還分票数を含む）" }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // オッズ4（馬単）レコード定義
@@ -1658,7 +1720,7 @@ namespace JVDataCollector
                             new NormalFieldDefinition { Position = 4019, Name = "umatan_total_votes", Length = 11, IsPrimaryKey = false, Comment = "馬単票数合計: 単位百円 馬単票数の合計（返還分票数を含む）" }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // オッズ5（3連複）レコード定義
@@ -1704,7 +1766,7 @@ namespace JVDataCollector
                             new NormalFieldDefinition { Position = 12281, Name = "sanrenpuku_total_votes", Length = 11, IsPrimaryKey = false, Comment = "3連複票数合計: 単位百円 3連複票数の合計（返還分票数を含む）" }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // オッズ6（3連単）レコード定義
@@ -1750,7 +1812,7 @@ namespace JVDataCollector
                             new NormalFieldDefinition { Position = 83273, Name = "sanrentan_total_votes", Length = 11, IsPrimaryKey = false, Comment = "3連単票数合計: 単位百円 3連単票数の合計（返還分票数を含む）" }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // 競走馬マスタレコード定義
@@ -2234,7 +2296,7 @@ namespace JVDataCollector
                             new NormalFieldDefinition { Position = 1605, Name = "registered_race_count", Length = 3, IsPrimaryKey = false, Comment = "登録レース数: JRA-VANに登録されている成績レース数" }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // 騎手マスタレコード定義
@@ -2771,7 +2833,7 @@ namespace JVDataCollector
                             }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // 調教師マスタレコード定義
@@ -3265,7 +3327,7 @@ namespace JVDataCollector
                             }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // 生産者マスタレコード定義
@@ -3321,7 +3383,7 @@ namespace JVDataCollector
                             }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // 馬主マスタレコード定義
@@ -3377,7 +3439,7 @@ namespace JVDataCollector
                             }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
             // 繁殖馬マスタレコード定義
@@ -3411,9 +3473,9 @@ namespace JVDataCollector
                             new NormalFieldDefinition { Position = 240, Name = "mother_breeding_registration_number", Length = 10, IsPrimaryKey = false, Comment = "母馬繁殖登録番号" }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
-                
+
             // 産駒マスタレコード定義
             recordDefinitions.Add(
                 new RecordDefinition
@@ -3453,8 +3515,675 @@ namespace JVDataCollector
                             }
                         }
                     },
-                    creationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
+
+            // レコードマスタレコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "RC",
+                    Table = new TableDefinition
+                    {
+                        Name = "record_master",
+                        Comment = "レコードマスタレコード: コースレコードおよびGⅠレコード情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'RC' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:初期値 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "record_category", Length = 1, IsPrimaryKey = true, Comment = "レコード識別区分: 1:コースレコード 2:ＧⅠレコード" },
+                            new NormalFieldDefinition { Position = 13, Name = "kaisai_year", Length = 4, IsPrimaryKey = true, Comment = "開催年: 該当レース施行年 西暦4桁 yyyy形式" },
+                            new NormalFieldDefinition { Position = 17, Name = "kaisai_month_day", Length = 4, IsPrimaryKey = true, Comment = "開催月日: 該当レース施行月日 各2桁 mmdd形式" },
+                            new NormalFieldDefinition { Position = 21, Name = "track_code", Length = 2, IsPrimaryKey = true, Comment = "競馬場コード: 該当レース施行競馬場 <コード表 2001.競馬場コード>参照" },
+                            new NormalFieldDefinition { Position = 23, Name = "kaisai_kai", Length = 2, IsPrimaryKey = true, Comment = "開催回[第N回]: 該当レース施行回 その競馬場でその年の何回目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 25, Name = "kaisai_day", Length = 2, IsPrimaryKey = true, Comment = "開催日目[N日目]: そのレース施行日目 そのレース施行回で何日目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 27, Name = "race_number", Length = 2, IsPrimaryKey = true, Comment = "レース番号: 該当レース番号" },
+                            new NormalFieldDefinition { Position = 29, Name = "special_race_number", Length = 4, IsPrimaryKey = true, Comment = "特別競走番号: ＧⅠレコードのみのキー" },
+                            new NormalFieldDefinition { Position = 33, Name = "race_name_main", Length = 60, IsPrimaryKey = false, Comment = "競走名本題: 全角30文字" },
+                            new NormalFieldDefinition { Position = 93, Name = "grade_code", Length = 1, IsPrimaryKey = false, Comment = "グレードコード: <コード表 2003.グレードコード>参照" },
+                            new NormalFieldDefinition { Position = 94, Name = "race_type_code", Length = 2, IsPrimaryKey = true, Comment = "競走種別コード: <コード表 2005.競走種別コード>参照" },
+                            new NormalFieldDefinition { Position = 96, Name = "distance", Length = 4, IsPrimaryKey = true, Comment = "距離: 単位:メートル" },
+                            new NormalFieldDefinition { Position = 100, Name = "track_code_detail", Length = 2, IsPrimaryKey = true, Comment = "トラックコード: <コード表 2009.トラックコード>参照" },
+                            new NormalFieldDefinition { Position = 102, Name = "record_kubun", Length = 1, IsPrimaryKey = false, Comment = "レコード区分: 1:基準タイム 2:レコードタイム 3:参考タイム 4:備考タイム" },
+                            new NormalFieldDefinition { Position = 103, Name = "record_time", Length = 4, IsPrimaryKey = false, Comment = "レコードタイム: 9分99秒9" },
+                            new NormalFieldDefinition { Position = 107, Name = "weather_code", Length = 1, IsPrimaryKey = false, Comment = "天候コード: <コード表 2011.天候コード>参照" },
+                            new NormalFieldDefinition { Position = 108, Name = "turf_condition_code", Length = 1, IsPrimaryKey = false, Comment = "芝馬場状態コード: <コード表 2010.馬場状態コード>参照" },
+                            new NormalFieldDefinition { Position = 109, Name = "dirt_condition_code", Length = 1, IsPrimaryKey = false, Comment = "ダート馬場状態コード: <コード表 2010.馬場状態コード>参照" },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 110,
+                                RepeatCount = 3,
+                                Length = 130,
+                                Table = new TableDefinition
+                                {
+                                    Name = "record_holder_horses",
+                                    Comment = "レコード保持馬情報: 同着を考慮し繰返し3回",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "blood_registration_number", Length = 10, IsPrimaryKey = false, Comment = "血統登録番号: 生年(西暦)4桁＋品種1桁＋数字5桁" },
+                                        new NormalFieldDefinition { Position = 11, Name = "horse_name", Length = 36, IsPrimaryKey = false, Comment = "馬名: 全角18文字" },
+                                        new NormalFieldDefinition { Position = 47, Name = "horse_symbol_code", Length = 2, IsPrimaryKey = false, Comment = "馬記号コード: <コード表 2204.馬記号コード>参照" },
+                                        new NormalFieldDefinition { Position = 49, Name = "sex_code", Length = 1, IsPrimaryKey = false, Comment = "性別コード: <コード表 2202.性別コード>参照" },
+                                        new NormalFieldDefinition { Position = 50, Name = "trainer_code", Length = 5, IsPrimaryKey = false, Comment = "調教師コード" },
+                                        new NormalFieldDefinition { Position = 55, Name = "trainer_name", Length = 34, IsPrimaryKey = false, Comment = "調教師名: 全角17文字 姓＋全角空白1文字＋名 外国人の場合は連続17文字" },
+                                        new NormalFieldDefinition { Position = 89, Name = "burden_weight", Length = 3, IsPrimaryKey = false, Comment = "負担重量: 単位:0.1kg" },
+                                        new NormalFieldDefinition { Position = 92, Name = "jockey_code", Length = 5, IsPrimaryKey = false, Comment = "騎手コード" },
+                                        new NormalFieldDefinition { Position = 97, Name = "jockey_name", Length = 34, IsPrimaryKey = false, Comment = "騎手名: 全角17文字 姓＋全角空白1文字＋名 外国人の場合は連続17文字" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 坂路調教レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "HC",
+                    Table = new TableDefinition
+                    {
+                        Name = "slope_training",
+                        Comment = "坂路調教レコード: 美浦・栗東トレーニングセンターでの坂路調教タイム情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'HC' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:初期値 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "training_center_kubun", Length = 1, IsPrimaryKey = true, Comment = "トレセン区分: 0:美浦 1:栗東" },
+                            new NormalFieldDefinition { Position = 13, Name = "training_date", Length = 8, IsPrimaryKey = true, Comment = "調教年月日: 西暦4桁＋月日各2桁 yyyymmdd 形式" },
+                            new NormalFieldDefinition { Position = 21, Name = "training_time", Length = 4, IsPrimaryKey = true, Comment = "調教時刻: 時分各2桁" },
+                            new NormalFieldDefinition { Position = 25, Name = "blood_registration_number", Length = 10, IsPrimaryKey = true, Comment = "血統登録番号: 生年(西暦)4桁＋品種1桁＋数字5桁" },
+                            new NormalFieldDefinition { Position = 35, Name = "four_furlong_total_time", Length = 4, IsPrimaryKey = false, Comment = "4ハロンタイム合計(800M～0M): 単位:999.9秒 測定不良時は0000をセット" },
+                            new NormalFieldDefinition { Position = 39, Name = "lap_time_800_600", Length = 3, IsPrimaryKey = false, Comment = "ラップタイム(800M～600M): 単位:99.9秒 測定不良時は000をセット" },
+                            new NormalFieldDefinition { Position = 42, Name = "three_furlong_total_time", Length = 4, IsPrimaryKey = false, Comment = "3ハロンタイム合計(600M～0M): 単位:999.9秒 測定不良時は0000をセット" },
+                            new NormalFieldDefinition { Position = 46, Name = "lap_time_600_400", Length = 3, IsPrimaryKey = false, Comment = "ラップタイム(600M～400M): 単位:99.9秒 測定不良時は000をセット" },
+                            new NormalFieldDefinition { Position = 49, Name = "two_furlong_total_time", Length = 4, IsPrimaryKey = false, Comment = "2ハロンタイム合計(400M～0M): 単位:999.9秒 測定不良時は0000をセット" },
+                            new NormalFieldDefinition { Position = 53, Name = "lap_time_400_200", Length = 3, IsPrimaryKey = false, Comment = "ラップタイム(400M～200M): 単位:99.9秒 測定不良時は000をセット" },
+                            new NormalFieldDefinition { Position = 56, Name = "lap_time_200_0", Length = 3, IsPrimaryKey = false, Comment = "ラップタイム(200M～0M): 単位:99.9秒 測定不良時は000をセット" }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 競走馬市場取引価格レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "HS",
+                    Table = new TableDefinition
+                    {
+                        Name = "horse_market_transaction",
+                        Comment = "競走馬市場取引価格レコード: 競走馬の市場取引価格情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'HS' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:初期値 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "blood_registration_number", Length = 10, IsPrimaryKey = true, Comment = "血統登録番号: 競走馬マスタへリンク" },
+                            new NormalFieldDefinition { Position = 22, Name = "father_breeding_registration_number", Length = 10, IsPrimaryKey = false, Comment = "父馬 繁殖登録番号: 繁殖馬マスタへリンク" },
+                            new NormalFieldDefinition { Position = 32, Name = "mother_breeding_registration_number", Length = 10, IsPrimaryKey = false, Comment = "母馬 繁殖登録番号: 繁殖馬マスタへリンク" },
+                            new NormalFieldDefinition { Position = 42, Name = "birth_year", Length = 4, IsPrimaryKey = false, Comment = "生年: XXXX年 競走馬の生年を設定" },
+                            new NormalFieldDefinition { Position = 46, Name = "organizer_market_code", Length = 6, IsPrimaryKey = true, Comment = "主催者・市場コード: 主催者・市場毎にユニークとなる値を設定する" },
+                            new NormalFieldDefinition { Position = 52, Name = "organizer_name", Length = 40, IsPrimaryKey = false, Comment = "主催者名称: 市場の主催者の名称を設定" },
+                            new NormalFieldDefinition { Position = 92, Name = "market_name", Length = 80, IsPrimaryKey = false, Comment = "市場の名称: 市場の名称を設定" },
+                            new NormalFieldDefinition { Position = 172, Name = "market_start_date", Length = 8, IsPrimaryKey = true, Comment = "市場の開催期間(開始日): 市場の開催期間（開始日)を設定。XXXX年XX月XX日 同一馬が複数回取引されることを考慮してキー設定。" },
+                            new NormalFieldDefinition { Position = 180, Name = "market_end_date", Length = 8, IsPrimaryKey = false, Comment = "市場の開催期間(終了日): 市場の開催期間（終了日)を設定。XXXX年XX月XX日" },
+                            new NormalFieldDefinition { Position = 188, Name = "horse_age_at_transaction", Length = 1, IsPrimaryKey = false, Comment = "取引時の競走馬の年齢: 0：0歳　1:1歳　2:2歳　3：3歳など　設定値が年齢に対応" },
+                            new NormalFieldDefinition { Position = 189, Name = "transaction_price", Length = 10, IsPrimaryKey = false, Comment = "取引価格: 単位 円" }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 馬名の意味由来レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "HY",
+                    Table = new TableDefinition
+                    {
+                        Name = "horse_name_meaning",
+                        Comment = "馬名の意味由来レコード: 競走馬の馬名の意味・由来情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'HY' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:初期値 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "blood_registration_number", Length = 10, IsPrimaryKey = true, Comment = "血統登録番号: 競走馬マスタへリンク" },
+                            new NormalFieldDefinition { Position = 22, Name = "horse_name", Length = 36, IsPrimaryKey = false, Comment = "馬名: 全角18文字" },
+                            new NormalFieldDefinition { Position = 58, Name = "horse_name_meaning", Length = 64, IsPrimaryKey = false, Comment = "馬名の意味由来: 全角32文字" }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 開催スケジュールレコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "YS",
+                    Table = new TableDefinition
+                    {
+                        Name = "race_schedule",
+                        Comment = "開催スケジュールレコード: 開催予定から開催終了まで、レースの開催情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'YS' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:開催予定(年末時点) 2:開催予定(開催直前時点) 3:開催終了(成績確定時点) 9:開催中止 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 4, Name = "data_creation_date", Length = 8, IsPrimaryKey = false, Comment = "データ作成年月日: 西暦4桁＋月日各2桁 yyyymmdd 形式" },
+                            new NormalFieldDefinition { Position = 12, Name = "kaisai_year", Length = 4, IsPrimaryKey = true, Comment = "開催年: 該当レース施行年 西暦4桁 yyyy形式" },
+                            new NormalFieldDefinition { Position = 16, Name = "kaisai_month_day", Length = 4, IsPrimaryKey = true, Comment = "開催月日: 該当レース施行月日 各2桁 mmdd形式" },
+                            new NormalFieldDefinition { Position = 20, Name = "track_code", Length = 2, IsPrimaryKey = true, Comment = "競馬場コード: 該当レース施行競馬場 <コード表 2001.競馬場コード>参照" },
+                            new NormalFieldDefinition { Position = 22, Name = "kaisai_kai", Length = 2, IsPrimaryKey = true, Comment = "開催回[第N回]: 該当レース施行回 その競馬場でその年の何回目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 24, Name = "kaisai_day", Length = 2, IsPrimaryKey = true, Comment = "開催日目[N日目]: 該当レース施行日目 そのレース施行回で何日目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 26, Name = "day_of_week_code", Length = 1, IsPrimaryKey = false, Comment = "曜日コード: 該当レース施行曜日 <コード表 2002.曜日コード>参照" },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 27,
+                                RepeatCount = 3,
+                                Length = 118,
+                                Table = new TableDefinition
+                                {
+                                    Name = "major_race_info",
+                                    Comment = "重賞案内: その日に開催される重賞レースの情報（最大3レース）",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "special_race_number", Length = 4, IsPrimaryKey = false, Comment = "特別競走番号: 重賞レースのみ設定 原則的には過去の同一レースと一致する番号(多数例外有り)" },
+                                        new NormalFieldDefinition { Position = 5, Name = "race_name_main", Length = 60, IsPrimaryKey = false, Comment = "競走名本題: 全角30文字 レース名の本題" },
+                                        new NormalFieldDefinition { Position = 65, Name = "race_name_short10", Length = 20, IsPrimaryKey = false, Comment = "競走名略称10文字: 全角10文字" },
+                                        new NormalFieldDefinition { Position = 85, Name = "race_name_short6", Length = 12, IsPrimaryKey = false, Comment = "競走名略称6文字: 全角6文字" },
+                                        new NormalFieldDefinition { Position = 97, Name = "race_name_short3", Length = 6, IsPrimaryKey = false, Comment = "競走名略称3文字: 全角3文字" },
+                                        new NormalFieldDefinition { Position = 103, Name = "jyusho_kaiji", Length = 3, IsPrimaryKey = false, Comment = "重賞回次[第N回]: そのレースの重賞としての通算回数を示す" },
+                                        new NormalFieldDefinition { Position = 106, Name = "grade_code", Length = 1, IsPrimaryKey = false, Comment = "グレードコード: <コード表 2003.グレードコード>参照 ※国際グレード表記(G) または その他の重賞表記（Jpn）の判別方法については、特記事項を参照。" },
+                                        new NormalFieldDefinition { Position = 107, Name = "race_type_code", Length = 2, IsPrimaryKey = false, Comment = "競走種別コード: <コード表 2005.競走種別コード>参照" },
+                                        new NormalFieldDefinition { Position = 109, Name = "race_symbol_code", Length = 3, IsPrimaryKey = false, Comment = "競走記号コード: <コード表 2006.競走記号コード>参照" },
+                                        new NormalFieldDefinition { Position = 112, Name = "weight_type_code", Length = 1, IsPrimaryKey = false, Comment = "重量種別コード: <コード表 2008.重量種別コード>参照" },
+                                        new NormalFieldDefinition { Position = 113, Name = "distance", Length = 4, IsPrimaryKey = false, Comment = "距離: 単位:メートル" },
+                                        new NormalFieldDefinition { Position = 117, Name = "track_code_detail", Length = 2, IsPrimaryKey = false, Comment = "トラックコード: <コード表 2009.トラックコード>参照" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 系統情報レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "BT",
+                    Table = new TableDefinition
+                    {
+                        Name = "bloodline_master",
+                        Comment = "系統情報レコード: 血統系統の分類と詳細説明情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'BT' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:新規登録 2:更新 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "breeding_registration_number", Length = 10, IsPrimaryKey = true, Comment = "繁殖登録番号: 系統の基準となる繁殖馬の登録番号" },
+                            new NormalFieldDefinition { Position = 22, Name = "bloodline_id", Length = 30, IsPrimaryKey = false, Comment = "系統ID: 2桁ごとに系譜を表現するID。詳しくは特記事項を参照" },
+                            new NormalFieldDefinition { Position = 52, Name = "bloodline_name", Length = 36, IsPrimaryKey = false, Comment = "系統名: 全角18文字 \"サンデーサイレンス\"系など、その系統の名称" },
+                            new NormalFieldDefinition { Position = 88, Name = "bloodline_description", Length = 6800, IsPrimaryKey = false, Comment = "系統説明: 系統の詳細説明テキスト" }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // コース情報レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "CS",
+                    Table = new TableDefinition
+                    {
+                        Name = "course_info",
+                        Comment = "コース情報レコード: 競馬場のコース詳細情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'CS' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:新規登録 2:更新 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "track_code", Length = 2, IsPrimaryKey = true, Comment = "競馬場コード: <コード表 2001.競馬場コード>参照" },
+                            new NormalFieldDefinition { Position = 14, Name = "distance", Length = 4, IsPrimaryKey = true, Comment = "距離: 単位：メートル" },
+                            new NormalFieldDefinition { Position = 18, Name = "track_code_detail", Length = 2, IsPrimaryKey = true, Comment = "トラックコード: <コード表 2009.トラックコード>参照" },
+                            new NormalFieldDefinition { Position = 20, Name = "course_renovation_date", Length = 8, IsPrimaryKey = true, Comment = "コース改修年月日: 西暦4桁＋月日各2桁 yyyymmdd 形式（コース改修後、最初に行われた開催日）" },
+                            new NormalFieldDefinition { Position = 28, Name = "course_description", Length = 6800, IsPrimaryKey = false, Comment = "コース説明: テキスト文" }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // タイム型データマイニング予想レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "DM",
+                    Table = new TableDefinition
+                    {
+                        Name = "time_mining_prediction",
+                        Comment = "タイム型データマイニング予想レコード: AI予想による走破タイムと信頼度情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                    new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'DM' をセット" },
+                    new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:前日予想(出馬発表後) 2:当日予想(天候馬場発表後) 3:直前予想(馬体重発表後) 7:成績(月曜) 0:該当レコード削除" },
+                    new NormalFieldDefinition { Position = 4, Name = "data_creation_date", Length = 8, IsPrimaryKey = false, Comment = "データ作成年月日: 西暦4桁＋月日各2桁 yyyymmdd 形式" },
+                    new NormalFieldDefinition { Position = 12, Name = "kaisai_year", Length = 4, IsPrimaryKey = true, Comment = "開催年: 該当レース施行年 西暦4桁 yyyy形式" },
+                    new NormalFieldDefinition { Position = 16, Name = "kaisai_month_day", Length = 4, IsPrimaryKey = true, Comment = "開催月日: 該当レース施行月日 各2桁 mmdd形式" },
+                    new NormalFieldDefinition { Position = 20, Name = "track_code", Length = 2, IsPrimaryKey = true, Comment = "競馬場コード: 該当レース施行競馬場 <コード表 2001.競馬場コード>参照" },
+                    new NormalFieldDefinition { Position = 22, Name = "kaisai_kai", Length = 2, IsPrimaryKey = true, Comment = "開催回[第N回]: 該当レース施行回 その競馬場でその年の何回目の開催かを示す" },
+                    new NormalFieldDefinition { Position = 24, Name = "kaisai_day", Length = 2, IsPrimaryKey = true, Comment = "開催日目[N日目]: そのレース施行回で何日目の開催かを示す" },
+                    new NormalFieldDefinition { Position = 26, Name = "race_number", Length = 2, IsPrimaryKey = true, Comment = "レース番号: 該当レース番号" },
+                    new NormalFieldDefinition { Position = 28, Name = "data_creation_time", Length = 4, IsPrimaryKey = false, Comment = "データ作成時分: 時分各2桁" },
+                    new RepeatFieldDefinition
+                    {
+                        Position = 32,
+                        RepeatCount = 18,
+                        Length = 15,
+                        Table = new TableDefinition
+                        {
+                            Name = "mining_predictions",
+                            Comment = "マイニング予想: 各馬の予想走破タイムと信頼度情報",
+                            Fields = new List<FieldDefinition>
+                            {
+                                new NormalFieldDefinition { Position = 1, Name = "horse_number", Length = 2, IsPrimaryKey = false, Comment = "馬番: 該当馬番01～18" },
+                                new NormalFieldDefinition { Position = 3, Name = "predicted_time", Length = 5, IsPrimaryKey = false, Comment = "予想走破タイム: 9分99秒99で設定" },
+                                new NormalFieldDefinition { Position = 8, Name = "error_plus", Length = 4, IsPrimaryKey = false, Comment = "予想誤差(信頼度)＋: 99秒99で設定 予想走破タイムに対して早くなる方向の誤差" },
+                                new NormalFieldDefinition { Position = 12, Name = "error_minus", Length = 4, IsPrimaryKey = false, Comment = "予想誤差(信頼度)－: 99秒99で設定 予想走破タイムに対して遅くなる方向の誤差" }
+                            }
+                        }
+                    }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 対戦型データマイニング予想レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "TM",
+                    Table = new TableDefinition
+                    {
+                        Name = "team_data_mining_prediction",
+                        Comment = "対戦型データマイニング予想レコード: AIによるレース予想情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'TM' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:前日予想(出馬発表後) 2:当日予想(天候馬場発表後) 3:直前予想(馬体重発表後) 7:成績(月曜) 0:該当レコード削除" },
+                            new NormalFieldDefinition { Position = 4, Name = "data_creation_date", Length = 8, IsPrimaryKey = false, Comment = "データ作成年月日: 西暦4桁＋月日各2桁 yyyymmdd 形式" },
+                            new NormalFieldDefinition { Position = 12, Name = "kaisai_year", Length = 4, IsPrimaryKey = true, Comment = "開催年: 該当レース施行年 西暦4桁 yyyy形式" },
+                            new NormalFieldDefinition { Position = 16, Name = "kaisai_month_day", Length = 4, IsPrimaryKey = true, Comment = "開催月日: 該当レース施行月日 各2桁 mmdd形式" },
+                            new NormalFieldDefinition { Position = 20, Name = "track_code", Length = 2, IsPrimaryKey = true, Comment = "競馬場コード: 該当レース施行競馬場 <コード表 2001.競馬場コード>参照" },
+                            new NormalFieldDefinition { Position = 22, Name = "kaisai_kai", Length = 2, IsPrimaryKey = true, Comment = "開催回[第N回]: 該当レース施行回 その競馬場でその年の何回目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 24, Name = "kaisai_day", Length = 2, IsPrimaryKey = true, Comment = "開催日目[N日目]: そのレース施行回で何日目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 26, Name = "race_number", Length = 2, IsPrimaryKey = true, Comment = "レース番号: 該当レース番号" },
+                            new NormalFieldDefinition { Position = 28, Name = "data_creation_time", Length = 4, IsPrimaryKey = false, Comment = "データ作成時分: 時分各2桁" },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 32,
+                                RepeatCount = 18,
+                                Length = 6,
+                                Table = new TableDefinition
+                                {
+                                    Name = "mining_prediction",
+                                    Comment = "マイニング予想: 各馬の予測スコア情報",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "horse_number", Length = 2, IsPrimaryKey = false, Comment = "馬番: 該当馬番01～18" },
+                                        new NormalFieldDefinition { Position = 3, Name = "prediction_score", Length = 4, IsPrimaryKey = false, Comment = "予測スコア: 000.0～100.0で設定 右から1バイト目を小数点第一位とする" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // WIN5(重勝式)レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "WF",
+                    Table = new TableDefinition
+                    {
+                        Name = "win5",
+                        Comment = "WIN5(重勝式)レコード: 重勝式(WIN5)の発売・払戻情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'WF' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:重勝式詳細発表時 2:重勝式対象1レース目確定時 3:重勝式払戻発表時 7:成績(月曜) 9:重勝式中止時 0:該当レコード削除" },
+                            new NormalFieldDefinition { Position = 12, Name = "kaisai_year", Length = 4, IsPrimaryKey = true, Comment = "開催年: 該当レース施行年 西暦4桁 yyyy形式" },
+                            new NormalFieldDefinition { Position = 16, Name = "kaisai_month_day", Length = 4, IsPrimaryKey = true, Comment = "開催月日: 該当レース施行月日 各2桁 mmdd形式" },
+                            new NormalFieldDefinition { Position = 20, Name = "reserve1", Length = 2, IsPrimaryKey = false, Comment = "予備" },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 22,
+                                RepeatCount = 5,
+                                Length = 8,
+                                Table = new TableDefinition
+                                {
+                                    Name = "target_races",
+                                    Comment = "重勝式対象レース情報: 重勝式対象レースの詳細情報",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "track_code", Length = 2, IsPrimaryKey = false, Comment = "競馬場コード: 該当レース施行競馬場 <コード表 2001.競馬場コード>参照" },
+                                        new NormalFieldDefinition { Position = 3, Name = "kaisai_kai", Length = 2, IsPrimaryKey = false, Comment = "開催回[第N回]: 該当レース施行回 その競馬場でその年の何回目の開催かを示す" },
+                                        new NormalFieldDefinition { Position = 5, Name = "kaisai_day", Length = 2, IsPrimaryKey = false, Comment = "開催日目[N日目]: そのレース施行日目 そのレース施行回で何日目の開催かを示す" },
+                                        new NormalFieldDefinition { Position = 7, Name = "race_number", Length = 2, IsPrimaryKey = false, Comment = "レース番号: 該当レース番号" }
+                                    }
+                                }
+                            },
+                            new NormalFieldDefinition { Position = 62, Name = "reserve2", Length = 6, IsPrimaryKey = false, Comment = "予備" },
+                            new NormalFieldDefinition { Position = 68, Name = "win5_total_votes", Length = 11, IsPrimaryKey = false, Comment = "重勝式発売票数: 重勝式の発売票数" },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 79,
+                                RepeatCount = 5,
+                                Length = 11,
+                                Table = new TableDefinition
+                                {
+                                    Name = "valid_votes_info",
+                                    Comment = "有効票数情報: 重勝式対象レース確定時、的中可能性のある残りの票数",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "valid_votes", Length = 11, IsPrimaryKey = false, Comment = "有効票数: 重勝式対象レース確定時、的中可能性のある残りの票数の数を示す" }
+                                    }
+                                }
+                            },
+                            new NormalFieldDefinition { Position = 134, Name = "refund_flag", Length = 1, IsPrimaryKey = false, Comment = "返還フラグ: 0:返還無 1:返還有" },
+                            new NormalFieldDefinition { Position = 135, Name = "failed_flag", Length = 1, IsPrimaryKey = false, Comment = "不成立フラグ: 0:不成立無 1:不成立有" },
+                            new NormalFieldDefinition { Position = 136, Name = "no_hit_flag", Length = 1, IsPrimaryKey = false, Comment = "的中無フラグ: 0:的中有 1:的中無" },
+                            new NormalFieldDefinition { Position = 137, Name = "carryover_initial", Length = 15, IsPrimaryKey = false, Comment = "キャリーオーバー金額初期: 単位 円 開催日当日開始時の、重勝式のキャリーオーバー金額を示す" },
+                            new NormalFieldDefinition { Position = 152, Name = "carryover_remaining", Length = 15, IsPrimaryKey = false, Comment = "キャリーオーバー金額残高: 単位 円 重勝式の次回へのキャリーオーバー金額を示す" },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 167,
+                                RepeatCount = 243,
+                                Length = 29,
+                                Table = new TableDefinition
+                                {
+                                    Name = "win5_payoff",
+                                    Comment = "重勝式払戻情報: 重勝式の的中組合せと払戻金情報",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "combination", Length = 10, IsPrimaryKey = false, Comment = "組番: 重勝式的中馬番組合（的中無の場合も重勝式的中馬番組合を設定）" },
+                                        new NormalFieldDefinition { Position = 11, Name = "payoff_money", Length = 9, IsPrimaryKey = false, Comment = "重勝式払戻金: 重勝式払戻金（的中無の場合000000000を設定）" },
+                                        new NormalFieldDefinition { Position = 20, Name = "hit_votes", Length = 10, IsPrimaryKey = false, Comment = "的中票数: 重勝式的中票数（的中無の場合0000000000を設定）" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 競走馬除外情報レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "JG",
+                    Table = new TableDefinition
+                    {
+                        Name = "horse_exclusion_info",
+                        Comment = "競走馬除外情報レコード: 出馬投票で除外された馬の情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'JG' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:初期値 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "kaisai_year", Length = 4, IsPrimaryKey = true, Comment = "開催年: 該当レース施行年 西暦4桁 yyyy形式" },
+                            new NormalFieldDefinition { Position = 16, Name = "kaisai_month_day", Length = 4, IsPrimaryKey = true, Comment = "開催月日: 該当レース施行月日 各2桁 mmdd形式" },
+                            new NormalFieldDefinition { Position = 20, Name = "track_code", Length = 2, IsPrimaryKey = true, Comment = "競馬場コード: 該当レース施行競馬場 <コード表 2001.競馬場コード>参照" },
+                            new NormalFieldDefinition { Position = 22, Name = "kaisai_kai", Length = 2, IsPrimaryKey = true, Comment = "開催回[第N回]: 該当レース施行回 その競馬場でその年の何回目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 24, Name = "kaisai_day", Length = 2, IsPrimaryKey = true, Comment = "開催日目[N日目]: そのレース施行日目 そのレース施行回で何日目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 26, Name = "race_number", Length = 2, IsPrimaryKey = true, Comment = "レース番号: 該当レース番号" },
+                            new NormalFieldDefinition { Position = 28, Name = "blood_registration_number", Length = 10, IsPrimaryKey = true, Comment = "血統登録番号: 生年(西暦)4桁＋品種1桁<コード表2201.品種コード>参照＋数字5桁" },
+                            new NormalFieldDefinition { Position = 38, Name = "horse_name", Length = 36, IsPrimaryKey = false, Comment = "馬名: 全角18字" },
+                            new NormalFieldDefinition { Position = 74, Name = "entry_order", Length = 3, IsPrimaryKey = true, Comment = "出馬投票受付順番: 同一業務日付で、同一馬を受付（出馬投票の追加、再投票）した順番" },
+                            new NormalFieldDefinition { Position = 77, Name = "entry_kubun", Length = 1, IsPrimaryKey = false, Comment = "出走区分: 1:投票馬 2:締切での除外馬 4:再投票馬 5:再投票除外馬 6:馬番を付さない出走取消馬 9:取消馬" },
+                            new NormalFieldDefinition { Position = 78, Name = "exclusion_status_kubun", Length = 1, IsPrimaryKey = false, Comment = "除外状態区分: 1:非抽選馬 2:非当選馬" }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // ウッドチップ調教レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "WC",
+                    Table = new TableDefinition
+                    {
+                        Name = "woodchip_training",
+                        Comment = "ウッドチップ調教レコード: ウッドチップコースでの調教タイム情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'WC' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:初期値 0:該当レコード削除(提供ミスなどの理由による)" },
+                            new NormalFieldDefinition { Position = 12, Name = "training_center_kubun", Length = 1, IsPrimaryKey = true, Comment = "トレセン区分: 0:美浦 1:栗東" },
+                            new NormalFieldDefinition { Position = 13, Name = "training_date", Length = 8, IsPrimaryKey = true, Comment = "調教年月日: 西暦4桁＋月日各2桁 yyyymmdd 形式" },
+                            new NormalFieldDefinition { Position = 21, Name = "training_time", Length = 4, IsPrimaryKey = true, Comment = "調教時刻: 時分各2桁" },
+                            new NormalFieldDefinition { Position = 25, Name = "blood_registration_number", Length = 10, IsPrimaryKey = true, Comment = "血統登録番号: 生年(西暦)4桁＋品種1桁＋数字5桁" },
+                            new NormalFieldDefinition { Position = 35, Name = "course", Length = 1, IsPrimaryKey = false, Comment = "コース: 0:A 1:B 2:C 3:D 4:E" },
+                            new NormalFieldDefinition { Position = 36, Name = "track_direction", Length = 1, IsPrimaryKey = false, Comment = "馬場周り: 0:右 1:左" },
+                            new NormalFieldDefinition { Position = 37, Name = "reserve1", Length = 1, IsPrimaryKey = false, Comment = "予備" },
+                            new NormalFieldDefinition { Position = 38, Name = "furlong_10_total_time", Length = 4, IsPrimaryKey = false, Comment = "10ハロンタイム合計(2000M～0M): 単位:999.9秒 測定不良時は0000 999.9秒以上は9999をセット" },
+                            new NormalFieldDefinition { Position = 42, Name = "lap_time_2000_1800", Length = 3, IsPrimaryKey = false, Comment = "ラップタイム(2000M～1800M): 単位:99.9秒 測定不良時は000 99.9秒以上は999をセット" },
+                            new NormalFieldDefinition { Position = 45, Name = "furlong_9_total_time", Length = 4, IsPrimaryKey = false, Comment = "9ハロンタイム合計(1800M～0M): 単位:999.9秒 測定不良時は0000 999.9秒以上は9999をセット" },
+                            new NormalFieldDefinition { Position = 49, Name = "lap_time_1800_1600", Length = 3, IsPrimaryKey = false, Comment = "ラップタイム(1800M～1600M): 単位:99.9秒 測定不良時は000 99.9秒以上は999をセット" },
+                            new NormalFieldDefinition { Position = 52, Name = "furlong_8_total_time", Length = 4, IsPrimaryKey = false, Comment = "8ハロンタイム合計(1600M～0M): 単位:999.9秒 測定不良時は0000 999.9秒以上は9999をセット" },
+                            new NormalFieldDefinition { Position = 56, Name = "lap_time_1600_1400", Length = 3, IsPrimaryKey = false, Comment = "ラップタイム(1600M～1400M): 単位:99.9秒 測定不良時は000 99.9秒以上は999をセット" },
+                            new NormalFieldDefinition { Position = 59, Name = "furlong_7_total_time", Length = 4, IsPrimaryKey = false, Comment = "7ハロンタイム合計(1400M～0M): 単位:999.9秒 測定不良時は0000 999.9秒以上は9999をセット" },
+                            new NormalFieldDefinition { Position = 63, Name = "lap_time_1400_1200", Length = 3, IsPrimaryKey = false, Comment = "ラップタイム(1400M～1200M): 単位:99.9秒 測定不良時は000 99.9秒以上は999をセット" },
+                            new NormalFieldDefinition { Position = 66, Name = "furlong_6_total_time", Length = 4, IsPrimaryKey = false, Comment = "6ハロンタイム合計(1200M～0M): 単位:999.9秒 測定不良時は0000 999.9秒以上は9999をセット" },
+                            new NormalFieldDefinition { Position = 70, Name = "lap_time_1200_1000", Length = 3, IsPrimaryKey = false, Comment = "ラップタイム(1200M～1000M): 単位:99.9秒 測定不良時は000 99.9秒以上は999をセット" },
+                            new NormalFieldDefinition { Position = 73, Name = "furlong_5_total_time", Length = 4, IsPrimaryKey = false, Comment = "5ハロンタイム合計(1000M～0M): 単位:999.9秒 測定不良時は0000 999.9秒以上は9999をセット" },
+                            new NormalFieldDefinition { Position = 77, Name = "lap_time_1000_800", Length = 3, IsPrimaryKey = false, Comment = "ラップタイム(1000M～800M): 単位:99.9秒 測定不良時は000 99.9秒以上は999をセット" },
+                            new NormalFieldDefinition { Position = 80, Name = "furlong_4_total_time", Length = 4, IsPrimaryKey = false, Comment = "4ハロンタイム合計(800M～0M): 単位:999.9秒 測定不良時は0000 999.9秒以上は9999をセット" },
+                            new NormalFieldDefinition { Position = 84, Name = "lap_time_800_600", Length = 3, IsPrimaryKey = false, Comment = "ラップタイム(800M～600M): 単位:99.9秒 測定不良時は000 99.9秒以上は999をセット" },
+                            new NormalFieldDefinition { Position = 87, Name = "furlong_3_total_time", Length = 4, IsPrimaryKey = false, Comment = "3ハロンタイム合計(600M～0M): 単位:999.9秒 測定不良時は0000 999.9秒以上は9999をセット" },
+                            new NormalFieldDefinition { Position = 91, Name = "lap_time_600_400", Length = 3, IsPrimaryKey = false, Comment = "ラップタイム(600M～400M): 単位:99.9秒 測定不良時は000 99.9秒以上は999をセット" },
+                            new NormalFieldDefinition { Position = 94, Name = "furlong_2_total_time", Length = 4, IsPrimaryKey = false, Comment = "2ハロンタイム合計(400M～0M): 単位:999.9秒 測定不良時は0000 999.9秒以上は9999をセット" },
+                            new NormalFieldDefinition { Position = 98, Name = "lap_time_400_200", Length = 3, IsPrimaryKey = false, Comment = "ラップタイム(400M～200M): 単位:99.9秒 測定不良時は000 99.9秒以上は999をセット" },
+                            new NormalFieldDefinition { Position = 101, Name = "lap_time_200_0", Length = 3, IsPrimaryKey = false, Comment = "ラップタイム(200M～0M): 単位:99.9秒 測定不良時は000 99.9秒以上は999をセット" }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 馬体重レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "WH",
+                    Table = new TableDefinition
+                    {
+                        Name = "horse_weight",
+                        Comment = "馬体重レコード: レース毎の各馬の体重情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'WH' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:初期値" },
+                            new NormalFieldDefinition { Position = 12, Name = "kaisai_year", Length = 4, IsPrimaryKey = true, Comment = "開催年: 該当レース施行年 西暦4桁 yyyy形式" },
+                            new NormalFieldDefinition { Position = 16, Name = "kaisai_month_day", Length = 4, IsPrimaryKey = true, Comment = "開催月日: 該当レース施行月日 各2桁 mmdd形式" },
+                            new NormalFieldDefinition { Position = 20, Name = "track_code", Length = 2, IsPrimaryKey = true, Comment = "競馬場コード: 該当レース施行競馬場 <コード表 2001.競馬場コード>参照" },
+                            new NormalFieldDefinition { Position = 22, Name = "kaisai_kai", Length = 2, IsPrimaryKey = true, Comment = "開催回[第N回]: 該当レース施行回 その競馬場でその年の何回目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 24, Name = "kaisai_day", Length = 2, IsPrimaryKey = true, Comment = "開催日目[N日目]: そのレース施行回で何日目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 26, Name = "race_number", Length = 2, IsPrimaryKey = true, Comment = "レース番号: 該当レース番号" },
+                            new NormalFieldDefinition { Position = 28, Name = "announce_month_day_hour_minute", Length = 8, IsPrimaryKey = false, Comment = "発表月日時分: 月日時分各2桁" },
+                            new RepeatFieldDefinition
+                            {
+                                Position = 36,
+                                RepeatCount = 18,
+                                Length = 45,
+                                Table = new TableDefinition
+                                {
+                                    Name = "weight_info",
+                                    Comment = "馬体重情報: 各馬の体重と増減情報",
+                                    Fields = new List<FieldDefinition>
+                                    {
+                                        new NormalFieldDefinition { Position = 1, Name = "horse_number", Length = 2, IsPrimaryKey = false, Comment = "馬番: 01～18を設定" },
+                                        new NormalFieldDefinition { Position = 3, Name = "horse_name", Length = 36, IsPrimaryKey = false, Comment = "馬名: 全角18文字 ただし当面は全角9文字のみ設定(9文字を超える馬名は9文字までとする)" },
+                                        new NormalFieldDefinition { Position = 39, Name = "horse_weight", Length = 3, IsPrimaryKey = false, Comment = "馬体重: 単位:kg 002Kg～998Kgまでが有効値 999:今走計量不能 000:出走取消" },
+                                        new NormalFieldDefinition { Position = 42, Name = "weight_change_sign", Length = 1, IsPrimaryKey = false, Comment = "増減符号: +:増加 -:減少 スペース:その他" },
+                                        new NormalFieldDefinition { Position = 43, Name = "weight_change", Length = 3, IsPrimaryKey = false, Comment = "増減差: 単位:kg 001Kg～998Kgまでが有効値 999:計量不能 000:前差なし スペース:初出走、出走取消" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 天候馬場状態レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "WE",
+                    Table = new TableDefinition
+                    {
+                        Name = "weather_track_condition",
+                        Comment = "天候馬場状態レコード: 天候と馬場状態の変更情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'WE' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:初期値" },
+                            new NormalFieldDefinition { Position = 12, Name = "kaisai_year", Length = 4, IsPrimaryKey = true, Comment = "開催年: 該当レース施行年 西暦4桁 yyyy形式" },
+                            new NormalFieldDefinition { Position = 16, Name = "kaisai_month_day", Length = 4, IsPrimaryKey = true, Comment = "開催月日: 該当レース施行月日 各2桁 mmdd形式" },
+                            new NormalFieldDefinition { Position = 20, Name = "track_code", Length = 2, IsPrimaryKey = true, Comment = "競馬場コード: 該当レース施行競馬場 <コード表 2001.競馬場コード>参照" },
+                            new NormalFieldDefinition { Position = 22, Name = "kaisai_kai", Length = 2, IsPrimaryKey = true, Comment = "開催回[第N回]: 該当レース施行回 その競馬場でその年の何回目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 24, Name = "kaisai_day", Length = 2, IsPrimaryKey = true, Comment = "開催日目[N日目]: そのレース施行回で何日目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 26, Name = "announce_month_day_hour_minute", Length = 8, IsPrimaryKey = true, Comment = "発表月日時分: 月日時分各2桁" },
+                            new NormalFieldDefinition { Position = 34, Name = "change_kubun", Length = 1, IsPrimaryKey = false, Comment = "変更識別: 1:天候馬場初期状態 2:天候変更 3:馬場状態変更" },
+                            new NormalFieldDefinition { Position = 35, Name = "current_weather_code", Length = 1, IsPrimaryKey = false, Comment = "天候状態（現在）: <コード表 2011.天候コード>参照" },
+                            new NormalFieldDefinition { Position = 36, Name = "current_turf_condition_code", Length = 1, IsPrimaryKey = false, Comment = "馬場状態・芝（現在）: <コード表 2010.馬場状態コード>参照" },
+                            new NormalFieldDefinition { Position = 37, Name = "current_dirt_condition_code", Length = 1, IsPrimaryKey = false, Comment = "馬場状態・ダート（現在）: <コード表 2010.馬場状態コード>参照" },
+                            new NormalFieldDefinition { Position = 38, Name = "previous_weather_code", Length = 1, IsPrimaryKey = false, Comment = "天候状態（変更前）: <コード表 2011.天候コード>参照" },
+                            new NormalFieldDefinition { Position = 39, Name = "previous_turf_condition_code", Length = 1, IsPrimaryKey = false, Comment = "馬場状態・芝（変更前）: <コード表 2010.馬場状態コード>参照" },
+                            new NormalFieldDefinition { Position = 40, Name = "previous_dirt_condition_code", Length = 1, IsPrimaryKey = false, Comment = "馬場状態・ダート（変更前）: <コード表 2010.馬場状態コード>参照" }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 出走取消・競走除外レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "AV",
+                    Table = new TableDefinition
+                    {
+                        Name = "race_withdrawal_exclusion",
+                        Comment = "出走取消・競走除外レコード: 出走取消及び競走除外された馬の情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'AV' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:出走取消 2:競走除外" },
+                            new NormalFieldDefinition { Position = 12, Name = "kaisai_year", Length = 4, IsPrimaryKey = true, Comment = "開催年: 該当レース施行年 西暦4桁 yyyy形式" },
+                            new NormalFieldDefinition { Position = 16, Name = "kaisai_month_day", Length = 4, IsPrimaryKey = true, Comment = "開催月日: 該当レース施行月日 各2桁 mmdd形式" },
+                            new NormalFieldDefinition { Position = 20, Name = "track_code", Length = 2, IsPrimaryKey = true, Comment = "競馬場コード: 該当レース施行競馬場 <コード表 2001.競馬場コード>参照" },
+                            new NormalFieldDefinition { Position = 22, Name = "kaisai_kai", Length = 2, IsPrimaryKey = true, Comment = "開催回[第N回]: 該当レース施行回 その競馬場でその年の何回目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 24, Name = "kaisai_day", Length = 2, IsPrimaryKey = true, Comment = "開催日目[N日目]: そのレース施行回で何日目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 26, Name = "race_number", Length = 2, IsPrimaryKey = true, Comment = "レース番号: 該当レース番号" },
+                            new NormalFieldDefinition { Position = 28, Name = "announce_month_day_hour_minute", Length = 8, IsPrimaryKey = true, Comment = "発表月日時分: 月日時分各2桁" },
+                            new NormalFieldDefinition { Position = 36, Name = "horse_number", Length = 2, IsPrimaryKey = true, Comment = "馬番: 該当馬番01～18" },
+                            new NormalFieldDefinition { Position = 38, Name = "horse_name", Length = 36, IsPrimaryKey = false, Comment = "馬名: 全角18文字 ただし当面は全角9文字のみ設定(9文字を超える馬名は9文字までとする)" },
+                            new NormalFieldDefinition { Position = 74, Name = "reason_code", Length = 3, IsPrimaryKey = false, Comment = "事由区分: 000:初期値 001:疾病 002:事故 003:その他" }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 騎手変更レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "JC",
+                    Table = new TableDefinition
+                    {
+                        Name = "jockey_change",
+                        Comment = "騎手変更レコード: 出馬表発表後の騎手変更情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'JC' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:初期値" },
+                            new NormalFieldDefinition { Position = 12, Name = "kaisai_year", Length = 4, IsPrimaryKey = true, Comment = "開催年: 該当レース施行年 西暦4桁 yyyy形式" },
+                            new NormalFieldDefinition { Position = 16, Name = "kaisai_month_day", Length = 4, IsPrimaryKey = true, Comment = "開催月日: 該当レース施行月日 各2桁 mmdd形式" },
+                            new NormalFieldDefinition { Position = 20, Name = "track_code", Length = 2, IsPrimaryKey = true, Comment = "競馬場コード: 該当レース施行競馬場 <コード表 2001.競馬場コード>参照" },
+                            new NormalFieldDefinition { Position = 22, Name = "kaisai_kai", Length = 2, IsPrimaryKey = true, Comment = "開催回[第N回]: 該当レース施行回 その競馬場でその年の何回目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 24, Name = "kaisai_day", Length = 2, IsPrimaryKey = true, Comment = "開催日目[N日目]: そのレース施行回で何日目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 26, Name = "race_number", Length = 2, IsPrimaryKey = true, Comment = "レース番号: 該当レース番号" },
+                            new NormalFieldDefinition { Position = 28, Name = "announce_month_day_hour_minute", Length = 8, IsPrimaryKey = true, Comment = "発表月日時分: 月日時分各2桁" },
+                            new NormalFieldDefinition { Position = 36, Name = "horse_number", Length = 2, IsPrimaryKey = true, Comment = "馬番: 該当馬番01～18" },
+                            new NormalFieldDefinition { Position = 38, Name = "horse_name", Length = 36, IsPrimaryKey = false, Comment = "馬名: 全角18文字 ただし当面は全角9文字のみ設定(9文字を超える馬名は9文字までとする)" },
+                            new NormalFieldDefinition { Position = 74, Name = "burden_weight_after", Length = 3, IsPrimaryKey = false, Comment = "変更後負担重量: 単位0.1kg" },
+                            new NormalFieldDefinition { Position = 77, Name = "jockey_code_after", Length = 5, IsPrimaryKey = false, Comment = "変更後騎手コード: 騎手マスタへリンク 変更後の騎手が未定の場合はALL0を設定" },
+                            new NormalFieldDefinition { Position = 82, Name = "jockey_name_after", Length = 34, IsPrimaryKey = false, Comment = "変更後騎手名: 全角17文字ただし当面は全角8文字のみ設定(8文字を超える騎手名は8文字までとする) 変更後の騎手が未定の場合は「未定」を設定" },
+                            new NormalFieldDefinition { Position = 116, Name = "jockey_apprentice_code_after", Length = 1, IsPrimaryKey = false, Comment = "変更後騎手見習コード: <コード表 2303.騎手見習コード>参照" },
+                            new NormalFieldDefinition { Position = 117, Name = "burden_weight_before", Length = 3, IsPrimaryKey = false, Comment = "変更前負担重量: 単位0.1kg" },
+                            new NormalFieldDefinition { Position = 120, Name = "jockey_code_before", Length = 5, IsPrimaryKey = false, Comment = "変更前騎手コード: 騎手マスタへリンク" },
+                            new NormalFieldDefinition { Position = 125, Name = "jockey_name_before", Length = 34, IsPrimaryKey = false, Comment = "変更前騎手名: 全角17文字ただし当面は全角8文字のみ設定(8文字を超える騎手名は8文字までとする)" },
+                            new NormalFieldDefinition { Position = 159, Name = "jockey_apprentice_code_before", Length = 1, IsPrimaryKey = false, Comment = "変更前騎手見習コード: <コード表 2303.騎手見習コード>参照" }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // 発走時刻変更レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "TC",
+                    Table = new TableDefinition
+                    {
+                        Name = "start_time_change",
+                        Comment = "発走時刻変更レコード: レースの発走時刻変更情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'TC' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:初期値" },
+                            new NormalFieldDefinition { Position = 12, Name = "kaisai_year", Length = 4, IsPrimaryKey = true, Comment = "開催年: 該当レース施行年 西暦4桁 yyyy形式" },
+                            new NormalFieldDefinition { Position = 16, Name = "kaisai_month_day", Length = 4, IsPrimaryKey = true, Comment = "開催月日: 該当レース施行月日 各2桁 mmdd形式" },
+                            new NormalFieldDefinition { Position = 20, Name = "track_code", Length = 2, IsPrimaryKey = true, Comment = "競馬場コード: 該当レース施行競馬場 <コード表 2001.競馬場コード>参照" },
+                            new NormalFieldDefinition { Position = 22, Name = "kaisai_kai", Length = 2, IsPrimaryKey = true, Comment = "開催回[第N回]: 該当レース施行回 その競馬場でその年の何回目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 24, Name = "kaisai_day", Length = 2, IsPrimaryKey = true, Comment = "開催日目[N日目]: そのレース施行日目 そのレース施行回で何日目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 26, Name = "race_number", Length = 2, IsPrimaryKey = true, Comment = "レース番号: 該当レース番号" },
+                            new NormalFieldDefinition { Position = 28, Name = "announce_month_day_hour_minute", Length = 8, IsPrimaryKey = true, Comment = "発表月日時分: 月日時分各2桁" },
+                            new NormalFieldDefinition { Position = 36, Name = "new_start_time", Length = 4, IsPrimaryKey = false, Comment = "変更後発走時刻: 時分各2桁 hhmm形式" },
+                            new NormalFieldDefinition { Position = 40, Name = "old_start_time", Length = 4, IsPrimaryKey = false, Comment = "変更前発走時刻: 時分各2桁 hhmm形式" }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // コース変更レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "CC",
+                    Table = new TableDefinition
+                    {
+                        Name = "course_change",
+                        Comment = "コース変更レコード: レース開催における距離やトラックの変更情報",
+                        Fields = new List<FieldDefinition>
+                        {
+                            new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'CC' をセット" },
+                            new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:初期値" },
+                            new NormalFieldDefinition { Position = 12, Name = "kaisai_year", Length = 4, IsPrimaryKey = true, Comment = "開催年: 該当レース施行年 西暦4桁 yyyy形式" },
+                            new NormalFieldDefinition { Position = 16, Name = "kaisai_month_day", Length = 4, IsPrimaryKey = true, Comment = "開催月日: 該当レース施行月日 各2桁 mmdd形式" },
+                            new NormalFieldDefinition { Position = 20, Name = "track_code", Length = 2, IsPrimaryKey = true, Comment = "競馬場コード: 該当レース施行競馬場 <コード表 2001.競馬場コード>参照" },
+                            new NormalFieldDefinition { Position = 22, Name = "kaisai_kai", Length = 2, IsPrimaryKey = true, Comment = "開催回[第N回]: 該当レース施行回 その競馬場でその年の何回目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 24, Name = "kaisai_day", Length = 2, IsPrimaryKey = true, Comment = "開催日目[N日目]: そのレース施行回で何日目の開催かを示す" },
+                            new NormalFieldDefinition { Position = 26, Name = "race_number", Length = 2, IsPrimaryKey = true, Comment = "レース番号: 該当レース番号" },
+                            new NormalFieldDefinition { Position = 28, Name = "announce_month_day_hour_minute", Length = 8, IsPrimaryKey = false, Comment = "発表月日時分: 月日時分各2桁" },
+                            new NormalFieldDefinition { Position = 36, Name = "distance_after", Length = 4, IsPrimaryKey = false, Comment = "変更後 距離: 単位：メートル" },
+                            new NormalFieldDefinition { Position = 40, Name = "track_code_after", Length = 2, IsPrimaryKey = false, Comment = "変更後 トラックコード: <コード表 2009.トラックコード>参照" },
+                            new NormalFieldDefinition { Position = 42, Name = "distance_before", Length = 4, IsPrimaryKey = false, Comment = "変更前 距離: 単位：メートル" },
+                            new NormalFieldDefinition { Position = 46, Name = "track_code_before", Length = 2, IsPrimaryKey = false, Comment = "変更前 トラックコード: <コード表 2009.トラックコード>参照" },
+                            new NormalFieldDefinition { Position = 48, Name = "reason_kubun", Length = 1, IsPrimaryKey = false, Comment = "事由区分: 1:強風　2:台風　3:雪　4:その他" }
+                        }
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
         }
     }
 }
