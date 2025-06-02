@@ -61,6 +61,7 @@ namespace JVDataCollector
         private readonly Dictionary<string, Dictionary<string, Dictionary<string, Object>>> buffers = new Dictionary<string, Dictionary<string, Dictionary<string, Object>>>();
         private readonly List<TableMetaData> tableMetaData = new List<TableMetaData>();
         private const int batchSize = 50000;
+        private const string sid = "SA000000/SD000004";
 
         public JVLinkForm(string[] args)
         {
@@ -475,10 +476,12 @@ namespace JVDataCollector
 
         private void ExecuteSetup()
         {
+            Console.WriteLine("Executing setup process...");
+
             CreateTables();
 
             Console.WriteLine("Initializing JVLink...");
-            int result = axJVLink1.JVInit("SA000000/SD000004");
+            int result = axJVLink1.JVInit(sid);
             if (result != 0)
             {
                 throw new InvalidOperationException($"JVInit failed with error code: {result}");
@@ -707,9 +710,65 @@ namespace JVDataCollector
             Console.WriteLine("Database tables created successfully.");
         }
 
+        private string GetLastFileTimestamp()
+        {
+            using (var connection = new NpgsqlConnection(connectionString))
+            {
+                connection.Open();
+
+                var selectSql = "SELECT last_file_timestamp FROM last_file_timestamp WHERE id = 1";
+                using (var command = new NpgsqlCommand(selectSql, connection))
+                {
+                    var result = command.ExecuteScalar();
+
+                    if (result != null)
+                    {
+                        string lastTimestamp = result.ToString();
+                        Console.WriteLine($"Found existing last_file_timestamp: {lastTimestamp}");
+                        return lastTimestamp;
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException("last_file_timestamp record not found. Please run setup command first.");
+                    }
+                }
+            }
+        }
+
         private void ExecuteUpdate()
         {
-            throw new NotImplementedException("Update functionality is not yet implemented");
+            Console.WriteLine("Executing update process...");
+
+            Console.WriteLine("Initializing JVLink...");
+            int result = axJVLink1.JVInit(sid);
+            if (result != 0)
+            {
+                throw new InvalidOperationException($"JVInit failed with error code: {result}");
+            }
+            Console.WriteLine("JVLink initialized successfully.");
+
+            // データベースからlast_file_timestampを取得
+            string fromTime = GetLastFileTimestamp();
+            Console.WriteLine($"Retrieved last file timestamp from database: {fromTime}");
+
+            // 全データ種別を一度に取得
+            StringBuilder sb = new StringBuilder();
+            sb.Append("TOKU");
+            sb.Append("DIFN");
+            sb.Append("HOSN");
+            sb.Append("HOYU");
+            sb.Append("COMM");
+            sb.Append("RACE");
+            sb.Append("SLOP");
+            sb.Append("WOOD");
+            sb.Append("YSCH");
+            sb.Append("MING");
+            sb.Append("BLDN");
+            sb.Append("SNPN");
+            string dataSpec = sb.ToString();
+            ProcessJVData(dataSpec, fromTime, 1);
+
+            Console.WriteLine("Update process completed.");
         }
 
         private void InitializeBuffers()
