@@ -304,15 +304,15 @@ class RaceInteractionLayer(nn.Module):
 class Horgues3Model(nn.Module):
     """統合された競馬予測モデル"""
 
-    def __init__(self, d_token=192, n_layers=3, n_heads=8, d_ffn=None, dropout=0.1, max_horses=18):
+    def __init__(self, numerical_features, categorical_features, d_token=192, n_layers=3, n_heads=8, d_ffn=None, dropout=0.1, max_horses=18):
         super().__init__()
         self.d_token = d_token
         self.max_horses = max_horses
 
         # 単純な特徴量用のトークナイザー
         self.tokenizer = FeatureTokenizer(
-            numerical_features=1,  # 馬体重
-            categorical_features=[],  # カテゴリ特徴量はなし
+            numerical_features=numerical_features,
+            categorical_features=categorical_features,
             d_token=d_token
         )
 
