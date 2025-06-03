@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from itertools import permutations
 import logging
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Dict
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -76,8 +76,8 @@ class PlackettLuceLoss(nn.Module):
                 race_loss -= log_prob[horse_idx_in_remaining]
 
                 # この馬を残りの候補から除外
-                mask = remaining_horses != current_horse
-                remaining_horses = remaining_horses[mask]
+                mask_remaining = remaining_horses != current_horse
+                remaining_horses = remaining_horses[mask_remaining]
 
             total_loss += race_loss
 
@@ -217,10 +217,8 @@ class TransformerBlock(nn.Module):
 class FTTransformer(nn.Module):
     """FT Transformer メインモデル"""
 
-    def __init__(self, numerical_features: int, categorical_features: List[int], d_token: int = 192, n_layers: int = 3, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
+    def __init__(self, d_token: int = 192, n_layers: int = 3, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
         super().__init__()
-
-        self.tokenizer = FeatureTokenizer(numerical_features, categorical_features, d_token)
 
         self.transformer_blocks = nn.ModuleList([
             TransformerBlock(d_token, n_heads, d_ffn, dropout) for _ in range(n_layers)
@@ -229,10 +227,7 @@ class FTTransformer(nn.Module):
         self.norm = nn.LayerNorm(d_token)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x_num: Optional[torch.Tensor] = None, x_cat: Optional[torch.Tensor] = None):
-        # 特徴量をトークン化
-        tokens = self.tokenizer(x_num, x_cat)
-
+    def forward(self, tokens: torch.Tensor):
         # Transformerブロックを通す
         for block in self.transformer_blocks:
             tokens = block(tokens)
@@ -279,6 +274,9 @@ class RaceInteractionLayer(nn.Module):
         """
         batch_size, num_horses, _ = horse_features.shape
 
+        # NaNをゼロで置換（マスクされた馬の特徴量）
+        horse_features = torch.where(torch.isnan(horse_features), torch.zeros_like(horse_features), horse_features)
+
         # アテンションマスクの準備 (パディングされた馬を除外)
         if mask is not None:
             # (batch_size, num_horses) -> (batch_size, 1, 1, num_horses)
@@ -299,5 +297,68 @@ class RaceInteractionLayer(nn.Module):
         # マスクされた馬のスコアを-infに設定 (softmax時に0になる)
         if mask is not None:
             scores = scores.masked_fill(~mask.bool(), float('-inf'))
+
+        return scores
+
+
+class Horgues3Model(nn.Module):
+    """統合された競馬予測モデル"""
+
+    def __init__(self, d_token=192, n_layers=3, n_heads=8, d_ffn=None, dropout=0.1, max_horses=18):
+        super().__init__()
+        self.d_token = d_token
+        self.max_horses = max_horses
+
+        # 単純な特徴量用のトークナイザー
+        self.tokenizer = FeatureTokenizer(
+            numerical_features=1,  # 馬体重
+            categorical_features=[],  # カテゴリ特徴量はなし
+            d_token=d_token
+        )
+
+        # FT Transformer
+        self.ft_transformer = FTTransformer(
+            d_token=d_token,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            d_ffn=d_ffn,
+            dropout=dropout
+        )
+
+        # レース内相互作用層
+        self.race_interaction = RaceInteractionLayer(
+            d_token=d_token,
+            n_heads=n_heads,
+            dropout=dropout
+        )
+
+    def forward(self, x_num: torch.Tensor, x_cat: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        """
+        Args:
+            x_num: (batch_size, num_horses, num_numericals) - 馬体重などの数値特徴量
+            x_cat: (batch_size, num_horses, num_categoricals) - カテゴリ特徴量
+            mask: (batch_size, num_horses) - 有効な馬のマスク (1=有効, 0=無効/パディング)
+        """
+        batch_size, max_horses, _ = x_num.shape
+
+        # 各馬の特徴量を個別にトークン化
+        horse_features = []
+
+        for i in range(max_horses):
+            # i番目の馬の特徴量
+            tokens = self.tokenizer(x_num[:, i], x_cat[:, i])
+
+            # 時系列データによるトークンの追加はここで行う
+            # tokens += additional_tokens
+
+            # FT Transformerで特徴抽出
+            features = self.ft_transformer(tokens)  # (batch_size, d_token)
+            horse_features.append(features)
+
+        # 全ての馬の特徴量を結合
+        horse_features = torch.stack(horse_features, dim=1)  # (batch_size, max_horses, d_token)
+
+        # レース内相互作用を考慮したスコア計算
+        scores = self.race_interaction(horse_features, mask)
 
         return scores
