@@ -12,103 +12,84 @@ logger = logging.getLogger(__name__)
 class PlackettLuceLoss(nn.Module):
     """
     Plackett-Luce損失関数
-    ランキング予測のための損失関数で、各馬の強さスコアから着順確率を計算し、
-    実際の着順との交差エントロピーを最小化する。
     """
 
-    def __init__(self, temperature=1.0, eps=1e-8):
+    def __init__(self, temperature=1.0):
         super(PlackettLuceLoss, self).__init__()
         self.temperature = temperature
-        self.eps = eps  # 数値安定性のための微小値
 
     def forward(self, scores, rankings, mask=None):
         """
         Args:
             scores: (batch_size, num_horses) - 各馬の強さスコア 
-            rankings: (batch_size, num_horses) - 実際の着順（1位=0, 2位=1, ...、無効馬=-1）
-            mask: (batch_size, num_horses) - 有効な馬のマスク (True=有効, False=無効/パディング)
-        
-        Returns:
-            loss: スカラーテンソル
+            rankings: (batch_size, num_horses) - 実際の着順（1位=0, 2位=1, ...）
+            mask: (batch_size, num_horses) - 有効な馬のマスク (1=有効, 0=無効/パディング)
         """
         batch_size, num_horses = scores.shape
-        device = scores.device
-        
+
+        # マスクが指定されていない場合はすべて有効とみなす
         if mask is None:
             mask = torch.ones_like(scores, dtype=torch.bool)
-        
-        total_loss = 0.0
+        else:
+            mask = mask.bool()
+
+        # スコアをtemperatureでスケール
+        scaled_scores = scores / self.temperature
+
+        # 各レースの損失を計算
+        total_loss = 0
         valid_races = 0
-        
-        # バッチ内の各レースについて処理
+
         for b in range(batch_size):
-            race_scores = scores[b]  # (num_horses,)
-            race_rankings = rankings[b]  # (num_horses,)
-            race_mask = mask[b]  # (num_horses,)
+            race_scores = scaled_scores[b]
+            race_rankings = rankings[b]
+            race_mask = mask[b]
             
-            # 有効な馬のインデックスを取得
-            valid_horses = torch.where(race_mask & (race_rankings >= 0))[0]
+            # 有効な馬のみを考慮
+            valid_indices = torch.where(race_mask)[0]
             
-            if len(valid_horses) < 2:
-                # 有効な馬が2頭未満の場合はスキップ
+            # 有効な馬が1頭以下の場合はスキップ
+            if len(valid_indices) <= 1:
                 continue
-            
-            # 有効な馬のスコアと着順を取得
-            valid_scores = race_scores[valid_horses]  # (valid_horses,)
-            valid_rankings = race_rankings[valid_horses]  # (valid_horses,)
-            
-            # スコアの範囲をクリップして数値安定性を向上
-            valid_scores = torch.clamp(valid_scores, min=-10.0, max=10.0)
-            
-            # 着順でソート（1位から順番に）
-            sorted_indices = torch.argsort(valid_rankings)
-            sorted_scores = valid_scores[sorted_indices]  # 着順順にソートされたスコア
-            
-            race_loss = 0.0
-            
-            # Plackett-Luce確率の計算
-            # 各位置での選択確率を順次計算
-            remaining_scores = sorted_scores.clone()
-            
-            for pos in range(len(sorted_scores) - 1):  # 最後の1頭は確率1なので除外
-                # 温度パラメータでスケール
-                scaled_scores = remaining_scores / self.temperature
                 
-                # 数値安定性のために最大値を引く
-                max_score = torch.max(scaled_scores)
-                scaled_scores = scaled_scores - max_score
-                
-                # より安定したsoftmax計算
-                exp_scores = torch.exp(torch.clamp(scaled_scores, min=-20.0, max=20.0))
-                sum_exp = torch.sum(exp_scores)
-                
-                # ゼロ除算を避ける
-                if sum_exp < self.eps:
-                    sum_exp = self.eps
-                
-                selected_prob = exp_scores[0] / sum_exp
-                
-                # 確率のクリップ
-                selected_prob = torch.clamp(selected_prob, min=self.eps, max=1.0 - self.eps)
-                
-                race_loss += -torch.log(selected_prob)
-                
-                # 選ばれた馬を除外して次の位置へ
-                remaining_scores = remaining_scores[1:]
-            
-            total_loss += race_loss
             valid_races += 1
-        
+            
+            # 着順でソート（有効な馬のみ）
+            valid_rankings = race_rankings[valid_indices]
+            sorted_valid_indices = valid_indices[torch.argsort(valid_rankings)]
+
+            race_loss = 0
+            remaining_horses = valid_indices.clone()
+
+            # 各着順について確率を計算
+            for position in range(len(valid_indices) - 1):  # 最後の馬は確率1なので除外
+                current_horse = sorted_valid_indices[position]
+
+                # 残っている馬の中でのsoftmax確率を計算
+                remaining_scores = race_scores[remaining_horses]
+                log_prob = F.log_softmax(remaining_scores, dim=0)
+
+                # 現在の馬のインデックスを残っている馬の中で見つける
+                horse_idx_in_remaining = (remaining_horses == current_horse).nonzero(as_tuple=True)[0]
+
+                # クロスエントロピー損失を加算
+                race_loss -= log_prob[horse_idx_in_remaining]
+
+                # この馬を残りの候補から除外
+                mask_remaining = remaining_horses != current_horse
+                remaining_horses = remaining_horses[mask_remaining]
+
+            total_loss += race_loss
+
+        # 有効なレースがない場合は0を返す
         if valid_races == 0:
-            # 有効なレースがない場合は0を返す
-            return torch.tensor(0.0, device=device, requires_grad=True)
-        
-        # 平均損失を返す
+            return torch.tensor(0.0, device=scores.device, requires_grad=True)
+            
         return total_loss / valid_races
 
         
 class FeatureTokenizer(nn.Module):
-    """数値特徴量とカテゴリ特徴量をトークン化"""
+    """数値特徴量とカテゴリ特徴量をトークン化（共通利用）"""
 
     def __init__(self, numerical_features: List[str], categorical_features: Dict[str, int], d_token: int = 192):
         super().__init__()
@@ -127,30 +108,22 @@ class FeatureTokenizer(nn.Module):
             for name, vocab_size in categorical_features.items()
         })
 
-        # [CLS]トークン
-        self.cls_token = nn.Parameter(torch.randn(1, 1, d_token))
-
     def forward(self, x_num: Optional[Dict[str, torch.Tensor]] = None, 
                 x_cat: Optional[Dict[str, torch.Tensor]] = None):
-        # 入力の形状を取得（バッチサイズと追加次元）
-        if x_num is not None:
-            sample_tensor = next(iter(x_num.values()))
-        else:
-            sample_tensor = next(iter(x_cat.values()))
-        
-        shape = sample_tensor.shape  # (batch_size, ..., feature_dim) or (batch_size, ...)
-        
+        """
+        Args:
+            x_num: 数値特徴量 - 各値は任意の形状のテンソル
+            x_cat: カテゴリ特徴量 - 各値は任意の形状のテンソル
+        Returns:
+            tokens: (..., num_tokens, d_token) - トークン化された特徴量
+        """
         tokens = []
-
-        # [CLS]トークンを追加（形状に合わせて拡張）
-        cls_tokens = self.cls_token.expand(*shape, -1)  # (..., d_token)
-        tokens.append(cls_tokens)
 
         # 数値特徴量のトークン化
         if x_num is not None:
             for name in self.numerical_features:
                 if name in x_num:
-                    feature_values = x_num[name]  # (...,)
+                    feature_values = x_num[name]  # 任意の形状
                     
                     # NaN処理
                     nan_mask = torch.isnan(feature_values)
@@ -169,13 +142,12 @@ class FeatureTokenizer(nn.Module):
         if x_cat is not None:
             for name in self.categorical_features.keys():
                 if name in x_cat:
-                    feature_values = x_cat[name]  # (...,)
+                    feature_values = x_cat[name]  # 任意の形状
                     token = self.categorical_tokenizers[name](feature_values)  # (..., d_token)
                     tokens.append(token)
 
         # トークンを結合
         result = torch.stack(tokens, dim=-2)  # (..., num_tokens, d_token)
-        
         return result
     
 class MultiHeadAttention(nn.Module):
@@ -208,15 +180,9 @@ class MultiHeadAttention(nn.Module):
         scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.d_head)
 
         if mask is not None:
-            if mask.dim() == 2:
-                # (batch_size, seq_len) -> (batch_size, 1, 1, seq_len)
-                attention_mask = mask.unsqueeze(1).unsqueeze(1)
-            elif mask.dim() == 4:
-                attention_mask = mask
-            else:
-                raise ValueError(f"Unexpected mask dimension: {mask.dim()}")
-            # (batch_size, 1, 1, seq_len) -> (batch_size, n_heads, seq_len, seq_len)
-            expanded_mask = attention_mask.expand(batch_size, self.n_heads, seq_len, seq_len)
+            # mask: (batch_size, seq_len)
+            attention_mask = mask.unsqueeze(1).unsqueeze(2)  # (batch_size, 1, 1, seq_len)
+            expanded_mask = attention_mask.expand(batch_size, self.n_heads, seq_len, seq_len)  # (batch_size, n_heads, seq_len, seq_len)
             scores = scores.masked_fill(expanded_mask == 0, -1e9)
         
         attention_weights = F.softmax(scores, dim=-1)
@@ -267,13 +233,17 @@ class TransformerBlock(nn.Module):
         x = self.norm2(x + self.dropout(ffn_output))
 
         return x  # (batch_size, seq_len, d_token)
-    
+
 
 class FTTransformer(nn.Module):
-    """FT Transformer メインモデル"""
+    """FT Transformer - 複数の特徴量を統合してCLSトークンを出力"""
 
-    def __init__(self, d_token: int = 192, n_layers: int = 3, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
+    def __init__(self, d_token: int = 192, n_layers: int = 2, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
         super().__init__()
+        self.d_token = d_token
+
+        # [CLS]トークン
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_token))
 
         self.transformer_blocks = nn.ModuleList([
             TransformerBlock(d_token, n_heads, d_ffn, dropout) for _ in range(n_layers)
@@ -282,33 +252,122 @@ class FTTransformer(nn.Module):
         self.norm = nn.LayerNorm(d_token)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, tokens: torch.Tensor):
-        # Transformerブロックを通す
-        for block in self.transformer_blocks:
-            tokens = block(tokens)
+    def forward(self, feature_tokens: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        """
+        Args:
+            feature_tokens: (..., num_features, d_token) - 特徴量トークン
+            mask: (..., num_features) - 特徴量マスク (1=有効, 0=無効/パディング)
+        Returns:
+            cls_output: (..., d_token) - CLSトークンの出力
+        """
+        # 入力の形状を取得
+        *batch_dims, num_features, d_token = feature_tokens.shape
+        batch_size = int(np.prod(batch_dims))
+        
+        # バッチ次元をまとめる
+        feature_tokens_flat = feature_tokens.view(batch_size, num_features, d_token)
+        
+        # [CLS]トークンを先頭に追加
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # (batch_size, 1, d_token)
+        tokens = torch.cat([cls_tokens, feature_tokens_flat], dim=1)  # (batch_size, num_features + 1, d_token)
 
-        # [CLS]トークンを使用して分類
-        cls_token = tokens[:, 0]
+        # マスクも[CLS]トークン分を拡張
+        if mask is not None:
+            mask_flat = mask.view(batch_size, num_features)
+            cls_mask = torch.ones(batch_size, 1, device=mask.device, dtype=mask.dtype)
+            mask_with_cls = torch.cat([cls_mask, mask_flat], dim=1)  # (batch_size, num_features + 1)
+        else:
+            mask_with_cls = None
+
+        # Transformerブロックを通す
+        x = tokens
+        for block in self.transformer_blocks:
+            x = block(x, mask_with_cls)
+
+        # [CLS]トークン（最初のトークン）を抽出
+        cls_token = x[:, 0]
         cls_token = self.norm(cls_token)
         cls_token = self.dropout(cls_token)
 
-        return cls_token  # (batch_size, d_token)
+        # 元の形状に戻す
+        cls_output = cls_token.view(*batch_dims, d_token)
+
+        return cls_output
 
 
-class RaceInteractionLayer(nn.Module):
-    """レース内の馬の相互作用を考慮したスコア計算層"""
+class SequenceTransformer(nn.Module):
+    """時系列データ処理用のTransformer (CLSトークンを出力)"""
 
-    def __init__(self, d_token: int, n_heads: int = 8, dropout: float = 0.1):
+    def __init__(self, d_token: int = 192, n_layers: int = 4, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
         super().__init__()
         self.d_token = d_token
-        self.n_heads = n_heads
 
-        # 馬同士の相互作用を計算するためのアテンション
-        self.interaction_attention = MultiHeadAttention(d_token, n_heads, dropout)
+        # [CLS]トークン
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_token))
 
-        # 相互作用後の特徴量を統合
-        self.interaction_norm = nn.LayerNorm(d_token)
-        self.interaction_dropout = nn.Dropout(dropout)
+        self.transformer_blocks = nn.ModuleList([
+            TransformerBlock(d_token, n_heads, d_ffn, dropout) for _ in range(n_layers)
+        ])
+
+        self.norm = nn.LayerNorm(d_token)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, sequence_tokens: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        """
+        Args:
+            sequence_tokens: (..., seq_len, d_token) - 時系列トークン
+            mask: (..., seq_len) - シーケンスマスク (1=有効, 0=無効/パディング)
+        Returns:
+            cls_output: (..., d_token) - CLSトークンの出力
+        """
+        # 入力の形状を取得
+        *batch_dims, seq_len, d_token = sequence_tokens.shape
+        batch_size = int(np.prod(batch_dims))
+        
+        # バッチ次元をまとめる
+        sequence_tokens_flat = sequence_tokens.view(batch_size, seq_len, d_token)
+
+        # [CLS]トークンを先頭に追加
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # (batch_size, 1, d_token)
+        tokens_with_cls = torch.cat([cls_tokens, sequence_tokens_flat], dim=1)  # (batch_size, seq_len + 1, d_token)
+
+        # マスクも[CLS]トークン分を拡張
+        if mask is not None:
+            mask_flat = mask.view(batch_size, seq_len)
+            cls_mask = torch.ones(batch_size, 1, device=mask.device, dtype=mask.dtype)
+            mask_with_cls = torch.cat([cls_mask, mask_flat], dim=1)  # (batch_size, seq_len + 1)
+        else:
+            mask_with_cls = None
+
+        # Transformerブロックを通す
+        x = tokens_with_cls
+        for block in self.transformer_blocks:
+            x = block(x, mask_with_cls)
+
+        # [CLS]トークン（最初のトークン）を抽出
+        cls_token = x[:, 0]
+        cls_token = self.norm(cls_token)
+        cls_token = self.dropout(cls_token)
+
+        # 元の形状に戻す
+        cls_output = cls_token.view(*batch_dims, d_token)
+
+        return cls_output
+
+
+class RaceTransformer(nn.Module):
+    """レース内の馬の相互作用を処理するTransformer (CLSトークンなし)"""
+
+    def __init__(self, d_token: int = 192, n_layers: int = 1, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
+        super().__init__()
+        self.d_token = d_token
+
+        self.transformer_blocks = nn.ModuleList([
+            TransformerBlock(d_token, n_heads, d_ffn, dropout) for _ in range(n_layers)
+        ])
+
+        self.norm = nn.LayerNorm(d_token)
+        self.dropout = nn.Dropout(dropout)
 
         # 最終的な強さスコアを計算
         self.score_head = nn.Sequential(
@@ -317,70 +376,119 @@ class RaceInteractionLayer(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(d_token // 2, 1)
         )
-        
+
         # 出力層にマークを付ける
         self.score_head[-1]._is_output_layer = True
 
-    def forward(self, horse_features: torch.Tensor, mask: Optional[torch.Tensor] = None):
+    def forward(self, horse_vectors: torch.Tensor, mask: Optional[torch.Tensor] = None):
         """
         Args:
-            horse_features: (batch_size, num_horses, d_token) - 各馬の特徴量
+            horse_vectors: (batch_size, num_horses, d_token) - 各馬のベクトル
             mask: (batch_size, num_horses) - 有効な馬のマスク (1=有効, 0=無効/パディング)
 
         Returns:
             scores: (batch_size, num_horses) - 相互作用を考慮した馬の強さスコア
         """
-        batch_size, num_horses, _ = horse_features.shape
-
         # NaNをゼロで置換（マスクされた馬の特徴量）
-        horse_features = torch.where(torch.isnan(horse_features), torch.zeros_like(horse_features), horse_features)
+        horse_vectors = torch.where(torch.isnan(horse_vectors), torch.zeros_like(horse_vectors), horse_vectors)
 
-        # 馬同士の相互作用を計算（maskはそのまま渡す）
-        interaction_features = self.interaction_attention(horse_features, mask)
+        # Transformerブロックを通す (相互作用を学習)
+        x = horse_vectors
+        for block in self.transformer_blocks:
+            x = block(x, mask)
 
-        # 残差接続と正規化
-        combined_features = self.interaction_norm(horse_features + self.interaction_dropout(interaction_features))
-
+        # 正規化とドロップアウト
+        x = self.norm(x)
+        x = self.dropout(x)
+        
         # 各馬の強さスコアを計算
-        scores = self.score_head(combined_features).squeeze(-1)  # (batch_size, num_horses)
+        scores = self.score_head(x).squeeze(-1)  # (batch_size, num_horses)
 
-        # マスクされた馬のスコアを-infに設定 (softmax時に0になる)
+        # マスクされた馬のスコアを-1e-9に設定 (softmax時に0になる)
         if mask is not None:
             scores = scores.masked_fill(~mask.bool(), -1e9)
 
         return scores
 
 
-class Horgues3Model(nn.Module):
+class HorguesModel(nn.Module):
     """統合された競馬予測モデル"""
 
-    def __init__(self, numerical_features, categorical_features, d_token=192, n_layers=3, n_heads=8, d_ffn=None, dropout=0.1, max_horses=18):
+    def __init__(self, 
+                 numerical_features: List[str],
+                 categorical_features: Dict[str, int],
+                 sequence_configs: Dict[str, Dict] = None,
+                 d_token: int = 192,
+                 ft_n_layers: int = 2,
+                 ft_n_heads: int = 8,
+                 ft_d_ffn: int = None,
+                 seq_n_layers: int = 4,
+                 seq_n_heads: int = 8,
+                 seq_d_ffn: int = None,
+                 race_n_layers: int = 1,
+                 race_n_heads: int = 8,
+                 race_d_ffn: int = None,
+                 dropout: float = 0.1,
+                 max_horses: int = 18):
         super().__init__()
         self.d_token = d_token
         self.max_horses = max_horses
         self.numerical_features = numerical_features
         self.categorical_features = categorical_features
+        self.sequence_configs = sequence_configs or {}
 
-        # 辞書形式の特徴量用のトークナイザー
+        # 共通のFeatureTokenizer
         self.tokenizer = FeatureTokenizer(
             numerical_features=numerical_features,
             categorical_features=categorical_features,
             d_token=d_token
         )
 
-        # FT Transformer
-        self.ft_transformer = FTTransformer(
+        # 時系列用のFTTransformer (特徴量統合用)
+        self.sequence_ft_transformers = nn.ModuleDict()
+        for seq_name, seq_config in self.sequence_configs.items():
+            self.sequence_ft_transformers[seq_name] = FTTransformer(
+                d_token=d_token,
+                n_layers=seq_config.get('ft_n_layers', ft_n_layers),
+                n_heads=seq_config.get('ft_n_heads', ft_n_heads),
+                d_ffn=seq_config.get('ft_d_ffn', ft_d_ffn),
+                dropout=dropout
+            )
+
+        # 時系列用のSequenceTransformer (時系列処理用)
+        self.sequence_transformers = nn.ModuleDict()
+        for seq_name, seq_config in self.sequence_configs.items():
+            self.sequence_transformers[seq_name] = SequenceTransformer(
+                d_token=d_token,
+                n_layers=seq_config.get('seq_n_layers', seq_n_layers),
+                n_heads=seq_config.get('seq_n_heads', seq_n_heads),
+                d_ffn=seq_config.get('seq_d_ffn', seq_d_ffn),
+                dropout=dropout
+            )
+
+        self.general_ft_transformer = FTTransformer(
             d_token=d_token,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            d_ffn=d_ffn,
+            n_layers=ft_n_layers,
+            n_heads=ft_n_heads,
+            d_ffn=ft_d_ffn,
             dropout=dropout
         )
 
-        # レース内相互作用層
-        self.race_interaction = RaceInteractionLayer(
+        # 最終統合用のFTTransformer
+        self.final_ft_transformer = FTTransformer(
             d_token=d_token,
-            n_heads=n_heads,
+            n_layers=ft_n_layers,
+            n_heads=ft_n_heads,
+            d_ffn=ft_d_ffn,
+            dropout=dropout
+        )
+
+        # Race Transformer (レース内相互作用用)
+        self.race_transformer = RaceTransformer(
+            d_token=d_token,
+            n_layers=race_n_layers,
+            n_heads=race_n_heads,
+            d_ffn=race_d_ffn,
             dropout=dropout
         )
 
@@ -416,31 +524,103 @@ class Horgues3Model(nn.Module):
             # CLSトークンなどのパラメータ
             nn.init.normal_(module, std=0.02)
 
-    def forward(self, x_num: Dict[str, torch.Tensor], x_cat: Dict[str, torch.Tensor], mask: Optional[torch.Tensor] = None):
+    def forward(self,
+                x_num: Dict[str, torch.Tensor],
+                x_cat: Dict[str, torch.Tensor],
+                sequence_data: Dict[str, Dict] = None,
+                mask: Optional[torch.Tensor] = None):
         """
         Args:
-            x_num: Dict with keys like 'horse_weight', 'weight_change' - (batch_size, num_horses)
-            x_cat: Dict with keys like 'weather_code' - (batch_size, num_horses)
-            mask: (batch_size, num_horses) - 有効な馬のマスク (1=有効, 0=無効/パディング)
+            x_num: Dict - 一般数値特徴量 (batch_size, num_horses)
+            x_cat: Dict - 一般カテゴリ特徴量 (batch_size, num_horses)
+            sequence_data: Dict - 時系列データ
+                例: {
+                    'jockey_history': {
+                        'x_num': {...},  # (batch_size, num_horses, seq_len)
+                        'x_cat': {...},  # (batch_size, num_horses, seq_len)
+                        'mask': ...      # (batch_size, num_horses, seq_len)
+                    }
+                }
+            mask: (batch_size, num_horses) - 有効な馬のマスク
+        Returns:
+            scores: (batch_size, num_horses) - 各馬の強さスコア
         """
-        batch_size, max_horses = next(iter(x_num.values())).shape
+        batch_size, num_horses = mask.shape if mask is not None else (list(x_num.values())[0].shape[:2] if x_num else list(x_cat.values())[0].shape[:2])
+        
+        # 各馬の最終特徴量を格納するリスト
+        horse_features = []
 
-        # 全ての馬の特徴量を一度にトークン化（2次元対応）
-        # (batch_size, num_horses) -> (batch_size, num_horses, num_tokens, d_token)
-        tokens = self.tokenizer(x_num, x_cat)
-        
-        # 各馬の特徴量を個別にFT Transformerで処理
-        # (batch_size, num_horses, num_tokens, d_token) -> (batch_size * num_horses, num_tokens, d_token)
-        batch_size, num_horses, num_tokens, d_token = tokens.shape
-        tokens_flat = tokens.view(batch_size * num_horses, num_tokens, d_token)
-        
-        # FT Transformerで特徴抽出（バッチ処理）
-        features_flat = self.ft_transformer(tokens_flat)  # (batch_size * num_horses, d_token)
-        
-        # 元の形状に戻す
-        horse_features = features_flat.view(batch_size, num_horses, d_token)  # (batch_size, num_horses, d_token)
+        for horse_idx in range(num_horses):
+            # 1. 時系列データの処理
+            sequence_features = []
+            
+            for seq_name, seq_data in (sequence_data or {}).items():
+                # 時系列データから該当馬のデータを抽出
+                seq_x_num = {}
+                seq_x_cat = {}
+                seq_mask = None
+                
+                if 'x_num' in seq_data:
+                    for key, val in seq_data['x_num'].items():
+                        seq_x_num[key] = val[:, horse_idx]  # (batch_size, seq_len)
+                
+                if 'x_cat' in seq_data:
+                    for key, val in seq_data['x_cat'].items():
+                        seq_x_cat[key] = val[:, horse_idx]  # (batch_size, seq_len)
+                
+                if 'mask' in seq_data:
+                    seq_mask = seq_data['mask'][:, horse_idx]  # (batch_size, seq_len)
 
-        # レース内相互作用を考慮したスコア計算
-        scores = self.race_interaction(horse_features, mask)
+                # FeatureTokenizer -> FTTransformer -> SequenceTransformer
+                seq_tokens = self.tokenizer(seq_x_num or None, seq_x_cat or None)  # (batch_size, seq_len, num_features, d_token)
+                
+                # 各時系列ステップの特徴量を統合
+                if seq_tokens.size(-2) > 0:  # 特徴量が存在する場合
+                    batch_size_seq, seq_len, num_features, d_token = seq_tokens.shape
+                    seq_tokens_reshaped = seq_tokens.view(batch_size_seq * seq_len, num_features, d_token)
+                    
+                    # FTTransformerで各時系列ステップの特徴量を統合
+                    step_features = self.sequence_ft_transformers[seq_name](seq_tokens_reshaped)  # (batch_size * seq_len, d_token)
+                    step_features = step_features.view(batch_size_seq, seq_len, d_token)  # (batch_size, seq_len, d_token)
+                    
+                    # SequenceTransformerで時系列を処理
+                    seq_feature = self.sequence_transformers[seq_name](step_features, seq_mask)  # (batch_size, d_token)
+                    sequence_features.append(seq_feature)
+
+            # 2. 一般データの処理
+            general_x_num = {}
+            general_x_cat = {}
+            
+            for key, val in (x_num or {}).items():
+                general_x_num[key] = val[:, horse_idx]  # (batch_size,)
+            
+            for key, val in (x_cat or {}).items():
+                general_x_cat[key] = val[:, horse_idx]  # (batch_size,)
+
+            # 一般データをトークン化
+            general_tokens = self.tokenizer(general_x_num or None, general_x_cat or None)  # (batch_size, num_features, d_token)
+            
+            # 一般データの特徴量を統合
+            if general_tokens.size(-2) > 0:  # 特徴量が存在する場合
+                general_feature = self.general_ft_transformer(general_tokens)  # (batch_size, d_token)
+                sequence_features.append(general_feature)
+
+            # 3. 最終統合
+            if sequence_features:
+                # 全ての特徴量を統合
+                all_features = torch.stack(sequence_features, dim=1)  # (batch_size, num_feature_types, d_token)
+                horse_feature = self.final_ft_transformer(all_features)  # (batch_size, d_token)
+            else:
+                # 特徴量がない場合はゼロベクトル
+                horse_feature = torch.zeros(batch_size, self.d_token, device=next(self.parameters()).device)
+            
+            horse_features.append(horse_feature)
+
+        # 4. レース内相互作用の処理
+        # 全馬のベクトルを結合
+        horse_vectors = torch.stack(horse_features, dim=1)  # (batch_size, num_horses, d_token)
+        
+        # RaceTransformerで相互作用を考慮した強さスコアを計算
+        scores = self.race_transformer(horse_vectors, mask)  # (batch_size, num_horses)
 
         return scores

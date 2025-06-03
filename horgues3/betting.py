@@ -247,55 +247,101 @@ def get_betting_combinations():
     return combinations
 
 
-def format_betting_results(race_id, probabilities, num_horses):
-    """馬券確率の結果をフォーマットして出力"""
+def format_betting_results(race_ids, probabilities, masks=None):
+    """
+    馬券確率の結果をフォーマットして出力（複数レース対応）
+    
+    Args:
+        race_ids: レースIDのリスト (num_races,)
+        probabilities: 各種馬券の確率を格納した辞書 (num_races, num_combinations)
+        masks: 有効な馬のマスク (num_races, num_horses)
+        
+    Returns:
+        results: フォーマットされた結果の文字列
+    """
+    num_races = len(race_ids)
     combinations = get_betting_combinations()
     
-    results = []
-    results.append(f"\n=== Race ID: {race_id} (有効馬数: {num_horses}) ===")
-
-    # 各馬券種の上位確率を表示
-    for bet_type in ['tansho', 'fukusho', 'umaren', 'umatan', 'wide', 'sanrenfuku', 'sanrentan']:
-        if bet_type not in probabilities:
-            continue
-            
-        probs = probabilities[bet_type]
-        combos = combinations[bet_type]
-        
-        # 確率でソート（降順）
-        sorted_indices = np.argsort(probs)[::-1]
-        
-        # 出力枚数を決定
-        num_output = 3 if bet_type in ['tansho', 'fukusho'] else 10
-        num_output = min(num_output, len(sorted_indices))
-        
-        # 上位の馬券を表示
-        bet_results = []
-        for i in range(num_output):
-            idx = sorted_indices[i]
-            prob = probs[idx]
-            
-            if bet_type in ['tansho', 'fukusho']:
-                # 単勝・複勝：馬番のみ
-                horse_num = combos[idx] + 1  # 0-indexedから1-indexedに変換
-                bet_results.append(f"{horse_num}番({prob:.4f})")
-            elif bet_type in ['umaren', 'umatan', 'wide']:
-                # 2頭の組み合わせ
-                horse1, horse2 = combos[idx]
-                horse1_num, horse2_num = horse1 + 1, horse2 + 1
-                if bet_type == 'umatan':
-                    bet_results.append(f"{horse1_num}-{horse2_num}({prob:.4f})")
-                else:
-                    bet_results.append(f"{horse1_num}-{horse2_num}({prob:.4f})")
-            else:
-                # 3頭の組み合わせ
-                horse1, horse2, horse3 = combos[idx]
-                horse1_num, horse2_num, horse3_num = horse1 + 1, horse2 + 1, horse3 + 1
-                if bet_type == 'sanrentan':
-                    bet_results.append(f"{horse1_num}-{horse2_num}-{horse3_num}({prob:.4f})")
-                else:
-                    bet_results.append(f"{horse1_num}-{horse2_num}-{horse3_num}({prob:.4f})")
-        
-        results.append(f"{bet_type.upper()}: {' '.join(bet_results)}")
+    all_results = []
     
-    return '\n'.join(results)
+    for race_idx in range(num_races):
+        race_id = race_ids[race_idx]
+        
+        # 有効馬数を計算
+        if masks is not None:
+            num_horses = int(masks[race_idx].sum())
+        else:
+            num_horses = 18  # デフォルト値
+        
+        results = []
+        results.append(f"\n=== Race ID: {race_id} (有効馬数: {num_horses}) ===")
+
+        # 各馬券種の上位確率を表示
+        for bet_type in ['tansho', 'fukusho', 'umaren', 'umatan', 'wide', 'sanrenfuku', 'sanrentan']:
+            if bet_type not in probabilities:
+                continue
+                
+            probs = probabilities[bet_type][race_idx]  # 該当レースの確率を取得
+            combos = combinations[bet_type]
+            
+            # 確率でソート（降順）
+            sorted_indices = np.argsort(probs)[::-1]
+            
+            # 出力枚数を決定
+            num_output = 3 if bet_type in ['tansho', 'fukusho'] else 10
+            num_output = min(num_output, len(sorted_indices))
+            
+            # 上位の馬券を表示
+            bet_results = []
+            for i in range(num_output):
+                idx = sorted_indices[i]
+                prob = probs[idx]
+                
+                # 確率が0に近い場合はスキップ
+                if prob < 1e-8:
+                    continue
+                
+                if bet_type in ['tansho', 'fukusho']:
+                    # 単勝・複勝：馬番のみ
+                    horse_num = combos[idx] + 1  # 0-indexedから1-indexedに変換
+                    
+                    # 有効な馬かチェック
+                    if masks is not None and not masks[race_idx][combos[idx]]:
+                        continue
+                        
+                    bet_results.append(f"{horse_num}番({prob:.4f})")
+                    
+                elif bet_type in ['umaren', 'umatan', 'wide']:
+                    # 2頭の組み合わせ
+                    horse1, horse2 = combos[idx]
+                    horse1_num, horse2_num = horse1 + 1, horse2 + 1
+                    
+                    # 有効な馬かチェック
+                    if masks is not None and (not masks[race_idx][horse1] or not masks[race_idx][horse2]):
+                        continue
+                    
+                    if bet_type == 'umatan':
+                        bet_results.append(f"{horse1_num}-{horse2_num}({prob:.4f})")
+                    else:
+                        bet_results.append(f"{horse1_num}-{horse2_num}({prob:.4f})")
+                        
+                else:
+                    # 3頭の組み合わせ
+                    horse1, horse2, horse3 = combos[idx]
+                    horse1_num, horse2_num, horse3_num = horse1 + 1, horse2 + 1, horse3 + 1
+                    
+                    # 有効な馬かチェック
+                    if masks is not None and (not masks[race_idx][horse1] or not masks[race_idx][horse2] or not masks[race_idx][horse3]):
+                        continue
+                    
+                    if bet_type == 'sanrentan':
+                        bet_results.append(f"{horse1_num}-{horse2_num}-{horse3_num}({prob:.4f})")
+                    else:
+                        bet_results.append(f"{horse1_num}-{horse2_num}-{horse3_num}({prob:.4f})")
+            
+            if bet_results:  # 有効な結果がある場合のみ表示
+                results.append(f"{bet_type.upper()}: {' '.join(bet_results)}")
+        
+        all_results.extend(results)
+    
+    return '\n'.join(all_results)
