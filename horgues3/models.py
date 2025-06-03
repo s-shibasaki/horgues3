@@ -132,38 +132,51 @@ class FeatureTokenizer(nn.Module):
 
     def forward(self, x_num: Optional[Dict[str, torch.Tensor]] = None, 
                 x_cat: Optional[Dict[str, torch.Tensor]] = None):
-        batch_size = (next(iter(x_num.values())).size(0) if x_num 
-                     else next(iter(x_cat.values())).size(0))
-
+        # 入力の形状を取得（バッチサイズと追加次元）
+        if x_num is not None:
+            sample_tensor = next(iter(x_num.values()))
+        else:
+            sample_tensor = next(iter(x_cat.values()))
+        
+        shape = sample_tensor.shape  # (batch_size, ..., feature_dim) or (batch_size, ...)
+        
         tokens = []
 
-        # [CLS]トークンを追加
-        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+        # [CLS]トークンを追加（形状に合わせて拡張）
+        cls_tokens = self.cls_token.expand(*shape, -1)  # (..., d_token)
         tokens.append(cls_tokens)
 
         # 数値特徴量のトークン化
         if x_num is not None:
             for name in self.numerical_features:
                 if name in x_num:
-                    feature_values = x_num[name].unsqueeze(-1)  # (batch_size, 1)
-                    nan_mask = torch.isnan(feature_values)  # (batch_size, 1)
+                    feature_values = x_num[name]  # (...,)
+                    
+                    # NaN処理
+                    nan_mask = torch.isnan(feature_values)
+                    clean_values = torch.where(nan_mask, torch.zeros_like(feature_values), feature_values)
+                    
+                    # Linearレイヤーのために最後に次元を追加
+                    clean_values = clean_values.unsqueeze(-1)  # (..., 1)
+                    token = self.numerical_tokenizers[name](clean_values)  # (..., d_token)
 
-                    # NaN値を0で置換してからトークン化
-                    clean_feature_values = torch.where(nan_mask, torch.zeros_like(feature_values), feature_values)
-                    token = self.numerical_tokenizers[name](clean_feature_values.unsqueeze(-1))  # (batch_size, 1, d_token)
-
-                    # NaN位置のトークンを完全にゼロにする
-                    token = torch.where(nan_mask.unsqueeze(-1), torch.zeros_like(token), token)
+                    # NaN位置のトークンをゼロにする
+                    nan_mask = nan_mask.unsqueeze(-1)  # (..., 1)
+                    token = torch.where(nan_mask, torch.zeros_like(token), token)
                     tokens.append(token)
 
         # カテゴリ特徴量のトークン化
         if x_cat is not None:
             for name in self.categorical_features.keys():
                 if name in x_cat:
-                    token = self.categorical_tokenizers[name](x_cat[name]).unsqueeze(1)  # (batch_size, 1, d_token)
+                    feature_values = x_cat[name]  # (...,)
+                    token = self.categorical_tokenizers[name](feature_values)  # (..., d_token)
                     tokens.append(token)
 
-        return torch.cat(tokens, dim=1)  # (batch_size, num_tokens, d_token)
+        # トークンを結合
+        result = torch.stack(tokens, dim=-2)  # (..., num_tokens, d_token)
+        
+        return result
     
 class MultiHeadAttention(nn.Module):
     """マルチヘッドアテンション"""
@@ -412,23 +425,20 @@ class Horgues3Model(nn.Module):
         """
         batch_size, max_horses = next(iter(x_num.values())).shape
 
-        # 各馬の特徴量を個別にトークン化
-        horse_features = []
-
-        for i in range(max_horses):
-            # i番目の馬の特徴量を辞書形式で抽出
-            horse_x_num = {key: value[:, i] for key, value in x_num.items()}
-            horse_x_cat = {key: value[:, i] for key, value in x_cat.items()}
-
-            # トークン化
-            tokens = self.tokenizer(horse_x_num, horse_x_cat)
-
-            # FT Transformerで特徴抽出
-            features = self.ft_transformer(tokens)  # (batch_size, d_token)
-            horse_features.append(features)
-
-        # 全ての馬の特徴量を結合
-        horse_features = torch.stack(horse_features, dim=1)  # (batch_size, max_horses, d_token)
+        # 全ての馬の特徴量を一度にトークン化（2次元対応）
+        # (batch_size, num_horses) -> (batch_size, num_horses, num_tokens, d_token)
+        tokens = self.tokenizer(x_num, x_cat)
+        
+        # 各馬の特徴量を個別にFT Transformerで処理
+        # (batch_size, num_horses, num_tokens, d_token) -> (batch_size * num_horses, num_tokens, d_token)
+        batch_size, num_horses, num_tokens, d_token = tokens.shape
+        tokens_flat = tokens.view(batch_size * num_horses, num_tokens, d_token)
+        
+        # FT Transformerで特徴抽出（バッチ処理）
+        features_flat = self.ft_transformer(tokens_flat)  # (batch_size * num_horses, d_token)
+        
+        # 元の形状に戻す
+        horse_features = features_flat.view(batch_size, num_horses, d_token)  # (batch_size, num_horses, d_token)
 
         # レース内相互作用を考慮したスコア計算
         scores = self.race_interaction(horse_features, mask)
