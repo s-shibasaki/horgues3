@@ -3,73 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from itertools import permutations
 import logging
+from typing import List, Optional, Union
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
-
-class HorseStrengthModel(nn.Module):
-    """馬埋め込みとレース埋め込みから馬の強さを予測するモデル"""
-
-    def __init__(self, horse_embed_dim, race_embed_dim, hidden_dim=128, dropout_rate=0.1):
-        super(HorseStrengthModel, self).__init__()
-        
-        self.horse_embed_dim = horse_embed_dim
-        self.race_embed_dim = race_embed_dim
-        self.hidden_dim = hidden_dim
-
-        # 馬の埋め込みベクトルを処理する層
-        self.horse_fc = nn.Linear(horse_embed_dim, hidden_dim)
-
-        # レースの埋め込みベクトルを処理する層
-        self.race_fc = nn.Linear(race_embed_dim, hidden_dim)
-
-        # 結合後の隠れ層
-        self.hidden_layers = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dim // 2, 1)  # 強さスコア (スカラ値)
-        )
-
-        self.dropout = nn.Dropout(dropout_rate)
-
-    def forward(self, horse_embeds, race_embed, mask=None):
-        """
-        Args:
-            horse_embeds: 馬の埋め込みベクトル (batch_size, num_horses, horse_embed_dim)
-            race_embed: レースの埋め込みベクトル (batch_size, race_embed_dim)
-            mask: 有効な馬のマスク (batch_size, num_horses)、1=有効、0=無効/パディング
-
-        Returns:
-            strength_scores: 馬の強さスコア (batch_size, num_horses)
-        """
-        batch_size, num_horses, _ = horse_embeds.shape
-
-        # 馬の埋め込みベクトルを処理
-        horse_features = F.relu(self.horse_fc(horse_embeds))  # (batch_size, num_horses, hidden_dim)
-        horse_features = self.dropout(horse_features)
-
-        # レース条件の埋め込みベクトルを処理
-        race_features = F.relu(self.race_fc(race_embed))  # (batch_size, hidden_dim)
-        race_features = self.dropout(race_features)
-
-        # レース条件を各馬に対して複製
-        race_features_expanded = race_features.unsqueeze(1).expand(-1, num_horses, -1)  # (batch_size, num_horses, hidden_dim)
-
-        # 馬の特徴量とレース条件を結合
-        combined_features = torch.cat([horse_features, race_features_expanded], dim=-1)  # (batch_size, num_horses, hidden_dim * 2)
-
-        # 強さスコアを計算
-        strength_scores = self.hidden_layers(combined_features).squeeze(-1)  # (batch_size, num_horses)
-
-        # マスクが指定されている場合、無効な馬のスコアを非常に小さい値に設定
-        if mask is not None:
-            strength_scores = strength_scores.masked_fill(mask == 0, -1e9)
-
-        return strength_scores  # (batch_size, num_horses)
 
 class PlackettLuceLoss(nn.Module):
     """
@@ -150,3 +88,216 @@ class PlackettLuceLoss(nn.Module):
         return total_loss / valid_races
 
 
+class FeatureTokenizer(nn.Module):
+    """数値特徴量とカテゴリ特徴量をトークン化"""
+
+    def __init__(self, numerical_features: int, categorical_features: List[int], d_token: int = 192):
+        super().__init__()
+        self.d_token = d_token
+        self.numerical_features = numerical_features
+        self.categorical_features = categorical_features
+
+        # 数値特徴量用の線形変換
+        if numerical_features > 0:
+            self.numerical_tokenizer = nn.Linear(1, d_token)
+
+        # カテゴリ特徴量用の埋め込み
+        self.categorical_tokenizers = nn.ModuleList([
+            nn.Embedding(vocab_size, d_token) for vocab_size in categorical_features
+        ])
+
+        # [CLS]トークン
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_token))
+
+    def forward(self, x_num: Optional[torch.Tensor] = None, x_cat: Optional[torch.Tensor] = None):
+        batch_size = x_num.size(0) if x_num is not None else x_cat.size(0)
+
+        tokens = []
+
+        # [CLS]トークンを追加
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+        tokens.append(cls_tokens)
+
+        # 数値特徴量のトークン化
+        if x_num is not None:
+            for i in range(self.numerical_features):
+                token = self.numerical_tokenizer(x_num[:, i:i+1].unsqueeze(-1))  # (batch_size, 1, d_token)
+                tokens.append(token)
+
+        # カテゴリ特徴量のトークン化
+        if x_cat is not None:
+            for i, tokenizer in enumerate(self.categorical_tokenizers):
+                token = tokenizer(x_cat[:, i]).unsqueeze(1)  # (batch_size, 1, d_token)
+                tokens.append(token)
+
+        return torch.cat(tokens, dim=1)  # (batch_size, num_tokens, d_token)
+    
+class MultiHeadAttention(nn.Module):
+    """マルチヘッドアテンション"""
+
+    def __init__(self, d_token: int, n_heads: int = 8, dropout: float = 0.1):
+        super().__init__()
+        assert d_token % n_heads == 0
+
+        self.d_token = d_token
+        self.n_heads = n_heads
+        self.d_head = d_token // n_heads
+
+        self.q_linear = nn.Linear(d_token, d_token)
+        self.k_linear = nn.Linear(d_token, d_token)
+        self.v_linear = nn.Linear(d_token, d_token)
+        self.out_linear = nn.Linear(d_token, d_token)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        batch_size, seq_len, _ = x.shape
+
+        # Q, K, Vの計算
+        Q = self.q_linear(x).view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        K = self.k_linear(x).view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        V = self.v_linear(x).view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+
+        # アテンションスコアを計算
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.d_head)
+
+        if mask is not None:
+            scores.masked_fill_(mask == 0, -1e9)
+        
+        attention_weights = F.softmax(scores, dim=-1)
+        attention_weights = self.dropout(attention_weights)
+
+        # アテンションを適用
+        context = torch.matmul(attention_weights, V)
+        context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_token)
+
+        return self.out_linear(context)  # (batch_size, seq_len, d_token)
+    
+
+class FeedForward(nn.Module):
+    """フィードフォワードネットワーク"""
+
+    def __init__(self, d_token: int, d_ffn: int, dropout: float = 0.1):
+        super().__init__()
+        self.linear1 = nn.Linear(d_token, d_ffn)
+        self.linear2 = nn.Linear(d_ffn, d_token)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor):
+        return self.linear2(self.dropout(F.relu(self.linear1(x))))  # (batch_size, seq_len, d_token)
+    
+
+class TransformerBlock(nn.Module):
+    """Transformerブロック"""
+
+    def __init__(self, d_token: int, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
+        super().__init__()
+        if d_ffn is None:
+            d_ffn = d_token * 4
+
+        self.attention = MultiHeadAttention(d_token, n_heads, dropout)
+        self.feed_forward = FeedForward(d_token, d_ffn, dropout)
+
+        self.norm1 = nn.LayerNorm(d_token)
+        self.norm2 = nn.LayerNorm(d_token)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        # アテンション + 残差接続
+        attention_output = self.attention(x, mask)
+        x = self.norm1(x + self.dropout(attention_output))
+
+        # フィードフォワード + 残差接続
+        ffn_output = self.feed_forward(x)
+        x = self.norm2(x + self.dropout(ffn_output))
+
+        return x  # (batch_size, seq_len, d_token)
+    
+
+class FTTransformer(nn.Module):
+    """FT Transformer メインモデル"""
+
+    def __init__(self, numerical_features: int, categorical_features: List[int], d_token: int = 192, n_layers: int = 3, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
+        super().__init__()
+
+        self.tokenizer = FeatureTokenizer(numerical_features, categorical_features, d_token)
+
+        self.transformer_blocks = nn.ModuleList([
+            TransformerBlock(d_token, n_heads, d_ffn, dropout) for _ in range(n_layers)
+        ])
+
+        self.norm = nn.LayerNorm(d_token)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x_num: Optional[torch.Tensor] = None, x_cat: Optional[torch.Tensor] = None):
+        # 特徴量をトークン化
+        tokens = self.tokenizer(x_num, x_cat)
+
+        # Transformerブロックを通す
+        for block in self.transformer_blocks:
+            tokens = block(tokens)
+
+        # [CLS]トークンを使用して分類
+        cls_token = tokens[:, 0]
+        cls_token = self.norm(cls_token)
+        cls_token = self.dropout(cls_token)
+
+        return cls_token  # (batch_size, d_token)
+
+
+class RaceInteractionLayer(nn.Module):
+    """レース内の馬の相互作用を考慮したスコア計算層"""
+
+    def __init__(self, d_token: int, n_heads: int = 8, dropout: float = 0.1):
+        super().__init__()
+        self.d_token = d_token
+        self.n_heads = n_heads
+
+        # 馬同士の相互作用を計算するためのアテンション
+        self.interaction_attention = MultiHeadAttention(d_token, n_heads, dropout)
+
+        # 相互作用後の特徴量を統合
+        self.interaction_norm = nn.LayerNorm(d_token)
+        self.interaction_dropout = nn.Dropout(dropout)
+
+        # 最終的な強さスコアを計算
+        self.score_head = nn.Sequential(
+            nn.Linear(d_token, d_token // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_token // 2, 1)
+        )
+
+    def forward(self, horse_features: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        """
+        Args:
+            horse_features: (batch_size, num_horses, d_token) - 各馬の特徴量
+            mask: (batch_size, num_horses) - 有効な馬のマスク (1=有効, 0=無効/パディング)
+
+        Returns:
+            scores: (batch_size, num_horses) - 相互作用を考慮した馬の強さスコア
+        """
+        batch_size, num_horses, _ = horse_features.shape
+
+        # アテンションマスクの準備 (パディングされた馬を除外)
+        if mask is not None:
+            # (batch_size, num_horses) -> (batch_size, 1, 1, num_horses)
+            attention_mask = mask.unsqueeze(1).unsqueeze(1)
+            attention_mask = attention_mask.expand(batch_size, self.n_heads, num_horses, num_horses)
+        else:
+            attention_mask = None
+
+        # 馬同士の相互作用を計算
+        interaction_features = self.interaction_attention(horse_features, attention_mask)
+
+        # 残差接続と正規化
+        combined_features = self.interaction_norm(horse_features + self.interaction_dropout(interaction_features))
+
+        # 各馬の強さスコアを計算
+        scores = self.score_head(combined_features).squeeze(-1)  # (batch_size, num_horses)
+
+        # マスクされた馬のスコアを-infに設定 (softmax時に0になる)
+        if mask is not None:
+            scores = scores.masked_fill(~mask.bool(), float('-inf'))
+
+        return scores
