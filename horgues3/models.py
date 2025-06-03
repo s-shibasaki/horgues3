@@ -110,26 +110,30 @@ class PlackettLuceLoss(nn.Module):
 class FeatureTokenizer(nn.Module):
     """数値特徴量とカテゴリ特徴量をトークン化"""
 
-    def __init__(self, numerical_features: int, categorical_features: List[int], d_token: int = 192):
+    def __init__(self, numerical_features: List[str], categorical_features: Dict[str, int], d_token: int = 192):
         super().__init__()
         self.d_token = d_token
         self.numerical_features = numerical_features
         self.categorical_features = categorical_features
 
-        # 数値特徴量用の線形変換
-        if numerical_features > 0:
-            self.numerical_tokenizer = nn.Linear(1, d_token)
+        # 数値特徴量用の線形変換（特徴量ごとに個別）
+        self.numerical_tokenizers = nn.ModuleDict({
+            name: nn.Linear(1, d_token) for name in numerical_features
+        })
 
         # カテゴリ特徴量用の埋め込み
-        self.categorical_tokenizers = nn.ModuleList([
-            nn.Embedding(vocab_size, d_token, padding_idx=0) for vocab_size in categorical_features
-        ])
+        self.categorical_tokenizers = nn.ModuleDict({
+            name: nn.Embedding(vocab_size, d_token, padding_idx=0) 
+            for name, vocab_size in categorical_features.items()
+        })
 
         # [CLS]トークン
         self.cls_token = nn.Parameter(torch.randn(1, 1, d_token))
 
-    def forward(self, x_num: Optional[torch.Tensor] = None, x_cat: Optional[torch.Tensor] = None):
-        batch_size = x_num.size(0) if x_num is not None else x_cat.size(0)
+    def forward(self, x_num: Optional[Dict[str, torch.Tensor]] = None, 
+                x_cat: Optional[Dict[str, torch.Tensor]] = None):
+        batch_size = (next(iter(x_num.values())).size(0) if x_num 
+                     else next(iter(x_cat.values())).size(0))
 
         tokens = []
 
@@ -139,23 +143,25 @@ class FeatureTokenizer(nn.Module):
 
         # 数値特徴量のトークン化
         if x_num is not None:
-            for i in range(self.numerical_features):
-                feature_values = x_num[:, i:i+1]  # (batch_size, 1)
-                nan_mask = torch.isnan(feature_values)  # (batch_size, 1)
+            for name in self.numerical_features:
+                if name in x_num:
+                    feature_values = x_num[name].unsqueeze(-1)  # (batch_size, 1)
+                    nan_mask = torch.isnan(feature_values)  # (batch_size, 1)
 
-                # NaN値を0で置換してからトークン化
-                clean_feature_values = torch.where(nan_mask, torch.zeros_like(feature_values), feature_values)
-                token = self.numerical_tokenizer(clean_feature_values.unsqueeze(-1))  # (batch_size, 1, d_token)
+                    # NaN値を0で置換してからトークン化
+                    clean_feature_values = torch.where(nan_mask, torch.zeros_like(feature_values), feature_values)
+                    token = self.numerical_tokenizers[name](clean_feature_values.unsqueeze(-1))  # (batch_size, 1, d_token)
 
-                # NaN位置のトークンを完全にゼロにする
-                token = torch.where(nan_mask.unsqueeze(-1), torch.zeros_like(token), token)
-                tokens.append(token)
+                    # NaN位置のトークンを完全にゼロにする
+                    token = torch.where(nan_mask.unsqueeze(-1), torch.zeros_like(token), token)
+                    tokens.append(token)
 
         # カテゴリ特徴量のトークン化
         if x_cat is not None:
-            for i, tokenizer in enumerate(self.categorical_tokenizers):
-                token = tokenizer(x_cat[:, i]).unsqueeze(1)  # (batch_size, 1, d_token)
-                tokens.append(token)
+            for name in self.categorical_features.keys():
+                if name in x_cat:
+                    token = self.categorical_tokenizers[name](x_cat[name]).unsqueeze(1)  # (batch_size, 1, d_token)
+                    tokens.append(token)
 
         return torch.cat(tokens, dim=1)  # (batch_size, num_tokens, d_token)
     
@@ -339,8 +345,10 @@ class Horgues3Model(nn.Module):
         super().__init__()
         self.d_token = d_token
         self.max_horses = max_horses
+        self.numerical_features = numerical_features
+        self.categorical_features = categorical_features
 
-        # 単純な特徴量用のトークナイザー
+        # 辞書形式の特徴量用のトークナイザー
         self.tokenizer = FeatureTokenizer(
             numerical_features=numerical_features,
             categorical_features=categorical_features,
@@ -395,24 +403,25 @@ class Horgues3Model(nn.Module):
             # CLSトークンなどのパラメータ
             nn.init.normal_(module, std=0.02)
 
-    def forward(self, x_num: torch.Tensor, x_cat: torch.Tensor, mask: Optional[torch.Tensor] = None):
+    def forward(self, x_num: Dict[str, torch.Tensor], x_cat: Dict[str, torch.Tensor], mask: Optional[torch.Tensor] = None):
         """
         Args:
-            x_num: (batch_size, num_horses, num_numericals) - 馬体重などの数値特徴量
-            x_cat: (batch_size, num_horses, num_categoricals) - カテゴリ特徴量
+            x_num: Dict with keys like 'horse_weight', 'weight_change' - (batch_size, num_horses)
+            x_cat: Dict with keys like 'weather_code' - (batch_size, num_horses)
             mask: (batch_size, num_horses) - 有効な馬のマスク (1=有効, 0=無効/パディング)
         """
-        batch_size, max_horses, _ = x_num.shape
+        batch_size, max_horses = next(iter(x_num.values())).shape
 
         # 各馬の特徴量を個別にトークン化
         horse_features = []
 
         for i in range(max_horses):
-            # i番目の馬の特徴量
-            tokens = self.tokenizer(x_num[:, i], x_cat[:, i])
+            # i番目の馬の特徴量を辞書形式で抽出
+            horse_x_num = {key: value[:, i] for key, value in x_num.items()}
+            horse_x_cat = {key: value[:, i] for key, value in x_cat.items()}
 
-            # 時系列データによるトークンの追加はここで行う
-            # tokens += additional_tokens
+            # トークン化
+            tokens = self.tokenizer(horse_x_num, horse_x_cat)
 
             # FT Transformerで特徴抽出
             features = self.ft_transformer(tokens)  # (batch_size, d_token)

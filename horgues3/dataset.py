@@ -215,18 +215,23 @@ class Horgues3Dataset(Dataset):
             horse_numbers = race_group['horse_number_numeric'].values
             horse_indices = horse_numbers - 1  # 馬番-1をインデックスに
             
-            # 数値特徴量の初期化（NaNで埋める）
-            x_num = np.full((self.max_horses, 2), np.nan, dtype=np.float32)
+            # 数値特徴量を辞書形式で初期化（NaNで埋める）
+            x_num = {
+                'horse_weight_numeric_normalized': np.full(self.max_horses, np.nan, dtype=np.float32),
+                'weight_change_numeric_normalized': np.full(self.max_horses, np.nan, dtype=np.float32)
+            }
             
             # 数値特徴量をベクトル化で設定
-            x_num[horse_indices, 0] = race_group['horse_weight_numeric_normalized'].values
-            x_num[horse_indices, 1] = race_group['weight_change_numeric_normalized'].values
+            x_num['horse_weight_numeric_normalized'][horse_indices] = race_group['horse_weight_numeric_normalized'].values
+            x_num['weight_change_numeric_normalized'][horse_indices] = race_group['weight_change_numeric_normalized'].values
             
-            # カテゴリ特徴量の初期化（0で埋める）
-            x_cat = np.zeros((self.max_horses, 1), dtype=np.int64)
+            # カテゴリ特徴量を辞書形式で初期化（0で埋める）
+            x_cat = {
+                'weather_code_encoded': np.zeros(self.max_horses, dtype=np.int64)
+            }
             
             # カテゴリ特徴量をベクトル化で設定
-            x_cat[horse_indices, 0] = race_group['weather_code_encoded'].values
+            x_cat['weather_code_encoded'][horse_indices] = race_group['weather_code_encoded'].values
             
             # 着順の初期化（-1で埋める、無効な馬を示す）
             rankings = np.full(self.max_horses, -1, dtype=np.int32)
@@ -241,10 +246,14 @@ class Horgues3Dataset(Dataset):
             # マスクをベクトル化で設定
             mask[horse_indices] = True
             
+            # テンソルに変換
+            x_num_tensors = {key: torch.tensor(value, dtype=torch.float32) for key, value in x_num.items()}
+            x_cat_tensors = {key: torch.tensor(value, dtype=torch.long) for key, value in x_cat.items()}
+            
             race_data = {
                 'race_id': race_id,
-                'x_num': torch.tensor(x_num, dtype=torch.float32),
-                'x_cat': torch.tensor(x_cat, dtype=torch.long),
+                'x_num': x_num_tensors,
+                'x_cat': x_cat_tensors,
                 'rankings': torch.tensor(rankings, dtype=torch.long),
                 'mask': torch.tensor(mask, dtype=torch.bool),
                 'num_horses': len(horse_indices)
@@ -256,14 +265,16 @@ class Horgues3Dataset(Dataset):
 
     def get_feature_config(self):
         """モデル初期化用の特徴量設定を返す"""
-        categorical_vocab_sizes = [
-            encoder.get_vocab_size()
-            for encoder in self.categorical_encoders.values()
-        ]
+        numerical_features = list(self.numerical_scalers.keys())
+        numerical_features = [name for name in numerical_features]
+        
+        categorical_features = {}
+        for feature, encoder in self.categorical_encoders.items():
+            categorical_features[feature] = encoder.get_vocab_size()
         
         return {
-            'numerical_features': len(self.numerical_scalers),
-            'categorical_features': categorical_vocab_sizes
+            'numerical_features': numerical_features,
+            'categorical_features': categorical_features
         }
 
     def __len__(self):
