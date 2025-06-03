@@ -12,82 +12,101 @@ logger = logging.getLogger(__name__)
 class PlackettLuceLoss(nn.Module):
     """
     Plackett-Luce損失関数
+    ランキング予測のための損失関数で、各馬の強さスコアから着順確率を計算し、
+    実際の着順との交差エントロピーを最小化する。
     """
 
-    def __init__(self, temperature=1.0):
+    def __init__(self, temperature=1.0, eps=1e-8):
         super(PlackettLuceLoss, self).__init__()
         self.temperature = temperature
+        self.eps = eps  # 数値安定性のための微小値
 
     def forward(self, scores, rankings, mask=None):
         """
         Args:
             scores: (batch_size, num_horses) - 各馬の強さスコア 
-            rankings: (batch_size, num_horses) - 実際の着順（1位=0, 2位=1, ...）
-            mask: (batch_size, num_horses) - 有効な馬のマスク (1=有効, 0=無効/パディング)
+            rankings: (batch_size, num_horses) - 実際の着順（1位=0, 2位=1, ...、無効馬=-1）
+            mask: (batch_size, num_horses) - 有効な馬のマスク (True=有効, False=無効/パディング)
+        
+        Returns:
+            loss: スカラーテンソル
         """
         batch_size, num_horses = scores.shape
-
-        # マスクが指定されていない場合はすべて有効とみなす
+        device = scores.device
+        
         if mask is None:
             mask = torch.ones_like(scores, dtype=torch.bool)
-        else:
-            mask = mask.bool()
-
-        # スコアをtemperatureでスケール
-        scaled_scores = scores / self.temperature
-
-        # 各レースの損失を計算
-        total_loss = 0
+        
+        total_loss = 0.0
         valid_races = 0
-
+        
+        # バッチ内の各レースについて処理
         for b in range(batch_size):
-            race_scores = scaled_scores[b]
-            race_rankings = rankings[b]
-            race_mask = mask[b]
+            race_scores = scores[b]  # (num_horses,)
+            race_rankings = rankings[b]  # (num_horses,)
+            race_mask = mask[b]  # (num_horses,)
             
-            # 有効な馬のみを考慮
-            valid_indices = torch.where(race_mask)[0]
+            # 有効な馬のインデックスを取得
+            valid_horses = torch.where(race_mask & (race_rankings >= 0))[0]
             
-            # 有効な馬が1頭以下の場合はスキップ
-            if len(valid_indices) <= 1:
+            if len(valid_horses) < 2:
+                # 有効な馬が2頭未満の場合はスキップ
                 continue
+            
+            # 有効な馬のスコアと着順を取得
+            valid_scores = race_scores[valid_horses]  # (valid_horses,)
+            valid_rankings = race_rankings[valid_horses]  # (valid_horses,)
+            
+            # スコアの範囲をクリップして数値安定性を向上
+            valid_scores = torch.clamp(valid_scores, min=-10.0, max=10.0)
+            
+            # 着順でソート（1位から順番に）
+            sorted_indices = torch.argsort(valid_rankings)
+            sorted_scores = valid_scores[sorted_indices]  # 着順順にソートされたスコア
+            
+            race_loss = 0.0
+            
+            # Plackett-Luce確率の計算
+            # 各位置での選択確率を順次計算
+            remaining_scores = sorted_scores.clone()
+            
+            for pos in range(len(sorted_scores) - 1):  # 最後の1頭は確率1なので除外
+                # 温度パラメータでスケール
+                scaled_scores = remaining_scores / self.temperature
                 
-            valid_races += 1
+                # 数値安定性のために最大値を引く
+                max_score = torch.max(scaled_scores)
+                scaled_scores = scaled_scores - max_score
+                
+                # より安定したsoftmax計算
+                exp_scores = torch.exp(torch.clamp(scaled_scores, min=-20.0, max=20.0))
+                sum_exp = torch.sum(exp_scores)
+                
+                # ゼロ除算を避ける
+                if sum_exp < self.eps:
+                    sum_exp = self.eps
+                
+                selected_prob = exp_scores[0] / sum_exp
+                
+                # 確率のクリップ
+                selected_prob = torch.clamp(selected_prob, min=self.eps, max=1.0 - self.eps)
+                
+                race_loss += -torch.log(selected_prob)
+                
+                # 選ばれた馬を除外して次の位置へ
+                remaining_scores = remaining_scores[1:]
             
-            # 着順でソート（有効な馬のみ）
-            valid_rankings = race_rankings[valid_indices]
-            sorted_valid_indices = valid_indices[torch.argsort(valid_rankings)]
-
-            race_loss = 0
-            remaining_horses = valid_indices.clone()
-
-            # 各着順について確率を計算
-            for position in range(len(valid_indices) - 1):  # 最後の馬は確率1なので除外
-                current_horse = sorted_valid_indices[position]
-
-                # 残っている馬の中でのsoftmax確率を計算
-                remaining_scores = race_scores[remaining_horses]
-                log_prob = F.log_softmax(remaining_scores, dim=0)
-
-                # 現在の馬のインデックスを残っている馬の中で見つける
-                horse_idx_in_remaining = (remaining_horses == current_horse).nonzero(as_tuple=True)[0]
-
-                # クロスエントロピー損失を加算
-                race_loss -= log_prob[horse_idx_in_remaining]
-
-                # この馬を残りの候補から除外
-                mask_remaining = remaining_horses != current_horse
-                remaining_horses = remaining_horses[mask_remaining]
-
             total_loss += race_loss
-
-        # 有効なレースがない場合は0を返す
+            valid_races += 1
+        
         if valid_races == 0:
-            return torch.tensor(0.0, device=scores.device, requires_grad=True)
-            
+            # 有効なレースがない場合は0を返す
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        
+        # 平均損失を返す
         return total_loss / valid_races
 
-
+        
 class FeatureTokenizer(nn.Module):
     """数値特徴量とカテゴリ特徴量をトークン化"""
 
@@ -103,7 +122,7 @@ class FeatureTokenizer(nn.Module):
 
         # カテゴリ特徴量用の埋め込み
         self.categorical_tokenizers = nn.ModuleList([
-            nn.Embedding(vocab_size, d_token) for vocab_size in categorical_features
+            nn.Embedding(vocab_size, d_token, padding_idx=0) for vocab_size in categorical_features
         ])
 
         # [CLS]トークン
@@ -121,7 +140,15 @@ class FeatureTokenizer(nn.Module):
         # 数値特徴量のトークン化
         if x_num is not None:
             for i in range(self.numerical_features):
-                token = self.numerical_tokenizer(x_num[:, i:i+1].unsqueeze(-1))  # (batch_size, 1, d_token)
+                feature_values = x_num[:, i:i+1]  # (batch_size, 1)
+                nan_mask = torch.isnan(feature_values)  # (batch_size, 1)
+
+                # NaN値を0で置換してからトークン化
+                clean_feature_values = torch.where(nan_mask, torch.zeros_like(feature_values), feature_values)
+                token = self.numerical_tokenizer(clean_feature_values.unsqueeze(-1))  # (batch_size, 1, d_token)
+
+                # NaN位置のトークンを完全にゼロにする
+                token = torch.where(nan_mask.unsqueeze(-1), torch.zeros_like(token), token)
                 tokens.append(token)
 
         # カテゴリ特徴量のトークン化
@@ -162,7 +189,16 @@ class MultiHeadAttention(nn.Module):
         scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.d_head)
 
         if mask is not None:
-            scores.masked_fill_(mask == 0, -1e9)
+            if mask.dim() == 2:
+                # (batch_size, seq_len) -> (batch_size, 1, 1, seq_len)
+                attention_mask = mask.unsqueeze(1).unsqueeze(1)
+            elif mask.dim() == 4:
+                attention_mask = mask
+            else:
+                raise ValueError(f"Unexpected mask dimension: {mask.dim()}")
+            # (batch_size, 1, 1, seq_len) -> (batch_size, n_heads, seq_len, seq_len)
+            expanded_mask = attention_mask.expand(batch_size, self.n_heads, seq_len, seq_len)
+            scores = scores.masked_fill(expanded_mask == 0, -1e9)
         
         attention_weights = F.softmax(scores, dim=-1)
         attention_weights = self.dropout(attention_weights)
@@ -262,6 +298,9 @@ class RaceInteractionLayer(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(d_token // 2, 1)
         )
+        
+        # 出力層にマークを付ける
+        self.score_head[-1]._is_output_layer = True
 
     def forward(self, horse_features: torch.Tensor, mask: Optional[torch.Tensor] = None):
         """
@@ -277,16 +316,8 @@ class RaceInteractionLayer(nn.Module):
         # NaNをゼロで置換（マスクされた馬の特徴量）
         horse_features = torch.where(torch.isnan(horse_features), torch.zeros_like(horse_features), horse_features)
 
-        # アテンションマスクの準備 (パディングされた馬を除外)
-        if mask is not None:
-            # (batch_size, num_horses) -> (batch_size, 1, 1, num_horses)
-            attention_mask = mask.unsqueeze(1).unsqueeze(1)
-            attention_mask = attention_mask.expand(batch_size, self.n_heads, num_horses, num_horses)
-        else:
-            attention_mask = None
-
-        # 馬同士の相互作用を計算
-        interaction_features = self.interaction_attention(horse_features, attention_mask)
+        # 馬同士の相互作用を計算（maskはそのまま渡す）
+        interaction_features = self.interaction_attention(horse_features, mask)
 
         # 残差接続と正規化
         combined_features = self.interaction_norm(horse_features + self.interaction_dropout(interaction_features))
@@ -296,7 +327,7 @@ class RaceInteractionLayer(nn.Module):
 
         # マスクされた馬のスコアを-infに設定 (softmax時に0になる)
         if mask is not None:
-            scores = scores.masked_fill(~mask.bool(), float('-inf'))
+            scores = scores.masked_fill(~mask.bool(), -1e9)
 
         return scores
 
@@ -331,6 +362,38 @@ class Horgues3Model(nn.Module):
             n_heads=n_heads,
             dropout=dropout
         )
+
+        # 重み初期化を追加
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        """重みの初期化"""
+        if isinstance(module, nn.Linear):
+            # He初期化（ReLU活性化関数用）とXavier初期化を使い分け
+            if hasattr(module, '_is_output_layer') and module._is_output_layer:
+                # 出力層は小さい値で初期化
+                nn.init.xavier_uniform_(module.weight, gain=0.1)
+            else:
+                # 中間層はHe初期化
+                nn.init.kaiming_uniform_(module.weight, mode='fan_in', nonlinearity='relu')
+            
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+                
+        elif isinstance(module, nn.Embedding):
+            # 埋め込み層の初期化
+            nn.init.normal_(module.weight, std=0.02)
+            if hasattr(module, 'padding_idx') and module.padding_idx is not None:
+                with torch.no_grad():
+                    module.weight[module.padding_idx].fill_(0.0)
+                    
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
+            
+        elif isinstance(module, nn.Parameter):
+            # CLSトークンなどのパラメータ
+            nn.init.normal_(module, std=0.02)
 
     def forward(self, x_num: torch.Tensor, x_cat: torch.Tensor, mask: Optional[torch.Tensor] = None):
         """

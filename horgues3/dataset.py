@@ -12,6 +12,54 @@ import os
 
 logger = logging.getLogger(__name__)
 
+
+class CustomLabelEncoder:
+    """カスタムラベルエンコーダー（0をパディング値として予約）"""
+    
+    def __init__(self):
+        self.classes_ = None
+        self.class_to_index = {}
+    
+    def fit(self, y):
+        """有効な値のみでフィット（NaN, None を無視）"""
+        # 有効な値のみを抽出
+        valid_values = []
+        for value in y:
+            if pd.isna(value) or value is None:
+                continue
+            valid_values.append(str(value))
+        
+        # ユニークな値を取得してソート
+        unique_values = sorted(list(set(valid_values)))
+        
+        # クラス一覧を保存（0は予約済みなので1から開始）
+        self.classes_ = unique_values
+        self.class_to_index = {cls: idx + 1 for idx, cls in enumerate(unique_values)}
+        
+        return self
+    
+    def transform(self, y):
+        """変換（NaN, None, 未知の値は0にマップ）"""
+        if self.classes_ is None:
+            raise ValueError("Encoder has not been fitted yet.")
+        
+        result = []
+        for value in y:
+            if pd.isna(value) or value is None:
+                result.append(0)  # パディング値
+            else:
+                str_value = str(value)
+                result.append(self.class_to_index.get(str_value, 0))  # 未知の値も0
+        
+        return np.array(result)
+    
+    def get_vocab_size(self):
+        """語彙サイズを取得（パディング用の0を含む）"""
+        if self.classes_ is None:
+            return 1  # パディング値のみ
+        return len(self.classes_) + 1  # 実際のクラス数 + パディング値
+
+
 class Horgues3Dataset(Dataset):
     def __init__(self, start_ymd, end_ymd, max_horses=18):
         super().__init__()
@@ -71,30 +119,20 @@ class Horgues3Dataset(Dataset):
 
         logger.info("Post-processing data...")
 
-        # 馬体重の数値変換（ベクトル化）
-        self.data['horse_weight_int'] = pd.to_numeric(self.data['horse_weight'], errors='coerce')
-        valid_weight_mask = (self.data['horse_weight_int'] >= 2) & (self.data['horse_weight_int'] <= 998)
+        # 数値に変換
+        self.data['horse_number_numeric'] = pd.to_numeric(self.data['horse_number'], errors='coerce')
+        self.data['final_order_numeric'] = pd.to_numeric(self.data['final_order'], errors='coerce')
 
-        # レースごとの馬体重中央値を計算して無効値を補完
-        valid_weights = self.data.loc[valid_weight_mask, ['race_id', 'horse_weight_int']]
-        race_medians = valid_weights.groupby('race_id')['horse_weight_int'].median()
-        
-        # 無効な馬体重を各レースの中央値で補完
-        invalid_weight_mask = ~valid_weight_mask
-        self.data.loc[invalid_weight_mask, 'horse_weight_int'] = (
-            self.data.loc[invalid_weight_mask, 'race_id'].map(race_medians)
-        )
+        # 馬体重の数値変換（2～998の範囲外の値をNaNにする）
+        self.data['horse_weight_numeric'] = pd.to_numeric(self.data['horse_weight'], errors='coerce')
+        valid_weight_mask = (self.data['horse_weight_numeric'] >= 2) & (self.data['horse_weight_numeric'] <= 998)
+        self.data.loc[~valid_weight_mask, 'horse_weight_numeric'] = np.nan
 
-        # 増減差の処理（ベクトル化）
-        weight_change_numeric = pd.to_numeric(self.data['weight_change'], errors='coerce')
-        valid_change_mask = (weight_change_numeric >= 0) & (weight_change_numeric <= 998)
-
-        # 増減差の符号を適用
-        self.data['weight_change_value'] = np.where(
-            valid_change_mask,
-            np.where(self.data['weight_change_sign'] == '-', -weight_change_numeric, weight_change_numeric),
-            0
-        )
+        # 増減差の処理（-998～998の範囲外の値をNaNにする）
+        weight_change_str = self.data['weight_change_sign'].fillna('') + self.data['weight_change'].fillna('')
+        self.data['weight_change_numeric'] = pd.to_numeric(weight_change_str, errors='coerce')
+        valid_change_mask = (self.data['weight_change_numeric'] >= -998) & (self.data['weight_change_numeric'] <= 998)
+        self.data.loc[~valid_change_mask, 'weight_change_numeric'] = np.nan
 
         logger.info("Post-processing completed.")
         return self
@@ -104,7 +142,7 @@ class Horgues3Dataset(Dataset):
         logger.info("Fitting preprocessors...")
 
         # 数値特徴量の前処理器をフィット（特徴量ごとに個別のスケーラー）
-        numerical_features = ['horse_weight_int', 'weight_change_value']
+        numerical_features = ['horse_weight_numeric', 'weight_change_numeric']
         for feature in numerical_features:
             scaler = StandardScaler()
             scaler.fit(self.data[[feature]])
@@ -113,9 +151,8 @@ class Horgues3Dataset(Dataset):
         # カテゴリ特徴量の前処理器をフィット
         categorical_features = ['weather_code']
         for feature in categorical_features:
-            encoder = LabelEncoder()
-            # 無効値を含む可能性があるので、fillnaで処理
-            encoder.fit(self.data[feature].fillna('unknown').astype(str))
+            encoder = CustomLabelEncoder()
+            encoder.fit(self.data[feature])
             self.categorical_encoders[feature] = encoder
 
         logger.info("Preprocessors fitted successfully.")
@@ -161,7 +198,7 @@ class Horgues3Dataset(Dataset):
         
         # カテゴリ特徴量のエンコード
         for feature, encoder in self.categorical_encoders.items():
-            encoded_values = encoder.transform(self.data[feature].fillna('unknown').astype(str))
+            encoded_values = encoder.transform(self.data[feature])
             self.data[f'{feature}_encoded'] = encoded_values
         
         logger.info("Data preprocessing completed.")
@@ -175,15 +212,15 @@ class Horgues3Dataset(Dataset):
         
         for race_id, race_group in self.data.groupby('race_id'):
             # 馬番を取得してインデックスに変換
-            horse_numbers = race_group['horse_number'].astype(int).values
+            horse_numbers = race_group['horse_number_numeric'].values
             horse_indices = horse_numbers - 1  # 馬番-1をインデックスに
             
             # 数値特徴量の初期化（NaNで埋める）
             x_num = np.full((self.max_horses, 2), np.nan, dtype=np.float32)
             
             # 数値特徴量をベクトル化で設定
-            x_num[horse_indices, 0] = race_group['horse_weight_int_normalized'].values
-            x_num[horse_indices, 1] = race_group['weight_change_value_normalized'].values
+            x_num[horse_indices, 0] = race_group['horse_weight_numeric_normalized'].values
+            x_num[horse_indices, 1] = race_group['weight_change_numeric_normalized'].values
             
             # カテゴリ特徴量の初期化（0で埋める）
             x_cat = np.zeros((self.max_horses, 1), dtype=np.int64)
@@ -195,7 +232,7 @@ class Horgues3Dataset(Dataset):
             rankings = np.full(self.max_horses, -1, dtype=np.int32)
             
             # 着順をベクトル化で設定（1位=0, 2位=1, ...）
-            final_orders = race_group['final_order'].astype(int).values
+            final_orders = race_group['final_order_numeric'].values
             rankings[horse_indices] = final_orders - 1
             
             # マスクの初期化（Falseで埋める）
@@ -220,7 +257,7 @@ class Horgues3Dataset(Dataset):
     def get_feature_config(self):
         """モデル初期化用の特徴量設定を返す"""
         categorical_vocab_sizes = [
-            len(encoder.classes_) 
+            encoder.get_vocab_size()
             for encoder in self.categorical_encoders.values()
         ]
         

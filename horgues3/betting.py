@@ -1,7 +1,7 @@
 import numpy as np
 from itertools import permutations, combinations
 
-def calculate_betting_probabilities(horse_strengths, mask=None):
+def calculate_betting_probabilities(horse_strengths, mask=None, temperature=1.0):
     """
     馬の強さスコアから各種馬券の確率を計算する関数
     
@@ -23,11 +23,14 @@ def calculate_betting_probabilities(horse_strengths, mask=None):
     # 無効な馬のスコアを非常に小さい値に設定
     masked_strengths = np.where(mask, horse_strengths, -np.inf)
     
+    # 温度パラメータでスケール
+    scaled_strengths = masked_strengths / temperature
+    
     # 各馬券タイプの確率を格納する辞書
     probabilities = {}
     
     # 指数化した強さスコア
-    exp_strengths = np.exp(masked_strengths)
+    exp_strengths = np.exp(scaled_strengths)
     
     # ==== 単勝（1位の馬を当てる）====
     probabilities['tansho'] = exp_strengths / np.sum(exp_strengths, axis=1, keepdims=True)
