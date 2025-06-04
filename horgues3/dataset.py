@@ -89,6 +89,8 @@ class HorguesDataset(Dataset):
             hri.weight_change,
             hri.final_order,
             rd.weather_code,
+            hri.blood_registration_number,
+            hri.jockey_code,
             CASE 
                 WHEN 
                     rd.track_code_detail BETWEEN '10' AND '22' OR
@@ -182,6 +184,8 @@ class HorguesDataset(Dataset):
         categorical_features = [
             'weather_code',
             'track_condition_code', 
+            'blood_registration_number',
+            'jockey_code'
         ]
         
         self.categorical_encoders = {}

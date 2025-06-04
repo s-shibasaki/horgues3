@@ -1,105 +1,124 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
+from typing import List, Optional, Union, Dict
 from itertools import permutations
 import logging
-from typing import List, Optional, Union, Dict
-import numpy as np
+
 
 logger = logging.getLogger(__name__)
 
 
-class PlackettLuceLoss(nn.Module):
+class SoftBinning(nn.Module):
     """
-    Plackett-Luce損失関数
+    標準化済み数値特徴量をソフトビニングするモジュール
+    
+    Args:
+        num_bins: ビンの数
+        temperature: ソフトマックスの温度パラメータ（低いほどハード、高いほどソフト）
+        init_range: ビン中心の初期化範囲 [-init_range, init_range]
     """
-
-    def __init__(self, temperature=1.0):
-        super(PlackettLuceLoss, self).__init__()
+    
+    def __init__(self, num_bins: int = 10, temperature: float = 1.0, init_range: float = 3.0):
+        super().__init__()
+        self.num_bins = num_bins
         self.temperature = temperature
-
-    def forward(self, scores, rankings, mask=None):
+        
+        # 学習可能なビン中心（標準化されたデータを想定して初期化）
+        self.bin_centers = nn.Parameter(
+            torch.linspace(-init_range, init_range, num_bins)
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            scores: (batch_size, num_horses) - 各馬の強さスコア 
-            rankings: (batch_size, num_horses) - 実際の着順（1位=0, 2位=1, ...）
-            mask: (batch_size, num_horses) - 有効な馬のマスク (1=有効, 0=無効/パディング)
+            x: 標準化済み数値特徴量 (...,) 任意の形状
+        Returns:
+            binned: ソフトビニング結果 (..., num_bins)
         """
-        batch_size, num_horses = scores.shape
-
-        # マスクが指定されていない場合はすべて有効とみなす
-        if mask is None:
-            mask = torch.ones_like(scores, dtype=torch.bool)
-        else:
-            mask = mask.bool()
-
-        # スコアをtemperatureでスケール
-        scaled_scores = scores / self.temperature
-
-        # 各レースの損失を計算
-        total_loss = 0
-        valid_races = 0
-
-        for b in range(batch_size):
-            race_scores = scaled_scores[b]
-            race_rankings = rankings[b]
-            race_mask = mask[b]
-            
-            # 有効な馬のみを考慮
-            valid_indices = torch.where(race_mask)[0]
-            
-            # 有効な馬が1頭以下の場合はスキップ
-            if len(valid_indices) <= 1:
-                continue
-                
-            valid_races += 1
-            
-            # 着順でソート（有効な馬のみ）
-            valid_rankings = race_rankings[valid_indices]
-            sorted_valid_indices = valid_indices[torch.argsort(valid_rankings)]
-
-            race_loss = 0
-            remaining_horses = valid_indices.clone()
-
-            # 各着順について確率を計算
-            for position in range(len(valid_indices) - 1):  # 最後の馬は確率1なので除外
-                current_horse = sorted_valid_indices[position]
-
-                # 残っている馬の中でのsoftmax確率を計算
-                remaining_scores = race_scores[remaining_horses]
-                log_prob = F.log_softmax(remaining_scores, dim=0)
-
-                # 現在の馬のインデックスを残っている馬の中で見つける
-                horse_idx_in_remaining = (remaining_horses == current_horse).nonzero(as_tuple=True)[0]
-
-                # クロスエントロピー損失を加算
-                race_loss -= log_prob[horse_idx_in_remaining]
-
-                # この馬を残りの候補から除外
-                mask_remaining = remaining_horses != current_horse
-                remaining_horses = remaining_horses[mask_remaining]
-
-            total_loss += race_loss
-
-        # 有効なレースがない場合は0を返す
-        if valid_races == 0:
-            return torch.tensor(0.0, device=scores.device, requires_grad=True)
-            
-        return total_loss / valid_races
-
+        # 入力の形状を保存
+        original_shape = x.shape
         
+        # xを展開して計算しやすくする
+        x_flat = x.view(-1, 1)  # (N, 1)
+        bin_centers = self.bin_centers.view(1, -1)  # (1, num_bins)
+        
+        # 各ビン中心との距離を計算（負の二乗距離）
+        distances = -(x_flat - bin_centers) ** 2  # (N, num_bins)
+        
+        # 温度でスケールしてソフトマックス
+        soft_assignments = F.softmax(distances / self.temperature, dim=-1)  # (N, num_bins)
+        
+        # 元の形状に戻す
+        output_shape = original_shape + (self.num_bins,)
+        return soft_assignments.view(output_shape)
+
+
+
+
+class SoftBinnedLinear(nn.Module):
+    """
+    数値特徴量をSoftBinningしてからLinear変換するモジュール
+    
+    Args:
+        num_bins: ビンの数
+        d_token: 出力次元
+        temperature: ソフトマックスの温度パラメータ
+        init_range: ビン中心の初期化範囲
+        dropout: ドロップアウト率
+    """
+    
+    def __init__(self, num_bins: int = 10, d_token: int = 192, temperature: float = 1.0, 
+                 init_range: float = 3.0, dropout: float = 0.1):
+        super().__init__()
+        self.soft_binning = SoftBinning(
+            num_bins=num_bins,
+            temperature=temperature,
+            init_range=init_range
+        )
+        self.linear = nn.Linear(num_bins, d_token)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: 標準化済み数値特徴量 (...,) 任意の形状
+        Returns:
+            output: (..., d_token) Linear変換後の特徴量
+        """
+        # SoftBinning適用
+        binned = self.soft_binning(x)  # (..., num_bins)
+        
+        # Linear変換
+        output = self.linear(binned)  # (..., d_token)
+        
+        # ドロップアウト
+        output = self.dropout(output)
+        
+        return output
+
+
 class FeatureTokenizer(nn.Module):
     """数値特徴量とカテゴリ特徴量をトークン化（共通利用）"""
 
-    def __init__(self, numerical_features: List[str], categorical_features: Dict[str, int], d_token: int = 192):
+    def __init__(self, numerical_features: List[str], categorical_features: Dict[str, int], 
+                 d_token: int = 192, num_bins: int = 10, binning_temperature: float = 1.0,
+                 binning_init_range: float = 3.0, dropout: float = 0.1):
         super().__init__()
         self.d_token = d_token
         self.numerical_features = numerical_features
         self.categorical_features = categorical_features
 
-        # 数値特徴量用の線形変換（特徴量ごとに個別）
+        # 数値特徴量用のSoftBinnedLinear（特徴量ごとに個別）
         self.numerical_tokenizers = nn.ModuleDict({
-            name: nn.Linear(1, d_token) for name in numerical_features
+            name: SoftBinnedLinear(
+                num_bins=num_bins,
+                d_token=d_token,
+                temperature=binning_temperature,
+                init_range=binning_init_range,
+                dropout=dropout
+            ) for name in numerical_features
         })
 
         # カテゴリ特徴量用の埋め込み
@@ -129,8 +148,7 @@ class FeatureTokenizer(nn.Module):
                     nan_mask = torch.isnan(feature_values)
                     clean_values = torch.where(nan_mask, torch.zeros_like(feature_values), feature_values)
                     
-                    # Linearレイヤーのために最後に次元を追加
-                    clean_values = clean_values.unsqueeze(-1)  # (..., 1)
+                    # SoftBinnedLinearで変換
                     token = self.numerical_tokenizers[name](clean_values)  # (..., d_token)
 
                     # NaN位置のトークンをゼロにする
@@ -238,7 +256,7 @@ class TransformerBlock(nn.Module):
 class FTTransformer(nn.Module):
     """FT Transformer - 複数の特徴量を統合してCLSトークンを出力"""
 
-    def __init__(self, d_token: int = 192, n_layers: int = 2, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
+    def __init__(self, d_token: int = 192, n_layers: int = 3, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
         super().__init__()
         self.d_token = d_token
 
@@ -298,7 +316,7 @@ class FTTransformer(nn.Module):
 class SequenceTransformer(nn.Module):
     """時系列データ処理用のTransformer (CLSトークンを出力)"""
 
-    def __init__(self, d_token: int = 192, n_layers: int = 4, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
+    def __init__(self, d_token: int = 192, n_layers: int = 3, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
         super().__init__()
         self.d_token = d_token
 
@@ -358,7 +376,7 @@ class SequenceTransformer(nn.Module):
 class RaceTransformer(nn.Module):
     """レース内の馬の相互作用を処理するTransformer (CLSトークンなし)"""
 
-    def __init__(self, d_token: int = 192, n_layers: int = 1, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
+    def __init__(self, d_token: int = 192, n_layers: int = 3, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
         super().__init__()
         self.d_token = d_token
 
@@ -369,17 +387,22 @@ class RaceTransformer(nn.Module):
         self.norm = nn.LayerNorm(d_token)
         self.dropout = nn.Dropout(dropout)
 
-        # 最終的な強さスコアを計算
+        # スコア計算ヘッドを改良（より安定した出力のため）
         self.score_head = nn.Sequential(
             nn.Linear(d_token, d_token // 2),
+            nn.LayerNorm(d_token // 2),  # LayerNormを追加
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_token // 2, 1)
+            nn.Linear(d_token // 2, d_token // 4),
+            nn.LayerNorm(d_token // 4),  # LayerNormを追加
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_token // 4, 1)
         )
 
         # 出力層にマークを付ける
         self.score_head[-1]._is_output_layer = True
-
+        
     def forward(self, horse_vectors: torch.Tensor, mask: Optional[torch.Tensor] = None):
         """
         Args:
@@ -418,17 +441,22 @@ class HorguesModel(nn.Module):
                  numerical_features: List[str],
                  categorical_features: Dict[str, int],
                  sequence_configs: Dict[str, Dict] = None,
-                 d_token: int = 192,
+                 d_token: int = 96,
+                 # SoftBinning関連のパラメータを追加
+                 num_bins: int = 10,
+                 binning_temperature: float = 1.0,
+                 binning_init_range: float = 3.0,
+                 # 既存のパラメータ
                  ft_n_layers: int = 2,
-                 ft_n_heads: int = 8,
+                 ft_n_heads: int = 4,
                  ft_d_ffn: int = None,
-                 seq_n_layers: int = 4,
-                 seq_n_heads: int = 8,
+                 seq_n_layers: int = 2,
+                 seq_n_heads: int = 4,
                  seq_d_ffn: int = None,
-                 race_n_layers: int = 1,
-                 race_n_heads: int = 8,
+                 race_n_layers: int = 2,
+                 race_n_heads: int = 4,
                  race_d_ffn: int = None,
-                 dropout: float = 0.1,
+                 dropout: float = 0.3,
                  max_horses: int = 18):
         super().__init__()
         self.d_token = d_token
@@ -437,11 +465,15 @@ class HorguesModel(nn.Module):
         self.categorical_features = categorical_features
         self.sequence_configs = sequence_configs or {}
 
-        # 共通のFeatureTokenizer
+        # 共通のFeatureTokenizer（SoftBinning対応）
         self.tokenizer = FeatureTokenizer(
             numerical_features=numerical_features,
             categorical_features=categorical_features,
-            d_token=d_token
+            d_token=d_token,
+            num_bins=num_bins,
+            binning_temperature=binning_temperature,
+            binning_init_range=binning_init_range,
+            dropout=dropout
         )
 
         # 時系列用のFTTransformer (特徴量統合用)
@@ -496,22 +528,22 @@ class HorguesModel(nn.Module):
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
-        """重みの初期化"""
+        """重みの初期化を改善"""
         if isinstance(module, nn.Linear):
-            # He初期化（ReLU活性化関数用）とXavier初期化を使い分け
             if hasattr(module, '_is_output_layer') and module._is_output_layer:
-                # 出力層は小さい値で初期化
-                nn.init.xavier_uniform_(module.weight, gain=0.1)
+                # 出力層は非常に小さい値で初期化（安定化のため）
+                nn.init.normal_(module.weight, mean=0.0, std=0.01)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
             else:
-                # 中間層はHe初期化
-                nn.init.kaiming_uniform_(module.weight, mode='fan_in', nonlinearity='relu')
-            
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-                
+                # 中間層はXavier初期化
+                nn.init.xavier_uniform_(module.weight, gain=1.0)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+                    
         elif isinstance(module, nn.Embedding):
             # 埋め込み層の初期化
-            nn.init.normal_(module.weight, std=0.02)
+            nn.init.normal_(module.weight, std=0.1)
             if hasattr(module, 'padding_idx') and module.padding_idx is not None:
                 with torch.no_grad():
                     module.weight[module.padding_idx].fill_(0.0)
@@ -522,7 +554,7 @@ class HorguesModel(nn.Module):
             
         elif isinstance(module, nn.Parameter):
             # CLSトークンなどのパラメータ
-            nn.init.normal_(module, std=0.02)
+            nn.init.normal_(module, std=0.1)
 
     def forward(self,
                 x_num: Dict[str, torch.Tensor],
@@ -624,3 +656,458 @@ class HorguesModel(nn.Module):
         scores = self.race_transformer(horse_vectors, mask)  # (batch_size, num_horses)
 
         return scores
+
+
+class PlackettLuceLoss(nn.Module):
+    """
+    Plackett-Luce損失関数 - 着順予測用
+    
+    Args:
+        temperature: ソフトマックスの温度パラメータ
+        top_k: 上位k位までの損失を計算（Noneの場合は全ての順位を使用）
+        reduction: 'mean', 'sum', 'none'
+    """
+    
+    def __init__(self, temperature: float = 1.0, top_k: Optional[int] = None, reduction: str = 'mean'):
+        super().__init__()
+        self.temperature = temperature
+        self.top_k = top_k
+        self.reduction = reduction
+    
+    def forward(self, scores: torch.Tensor, rankings: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            scores: 予測スコア (batch_size, num_horses)
+            rankings: 真の着順 (batch_size, num_horses) - 0-indexed、-1は無効
+            mask: 有効な馬のマスク (batch_size, num_horses)
+            
+        Returns:
+            loss: Plackett-Luce損失
+        """
+        batch_size, num_horses = scores.shape
+        
+        # 温度でスケール
+        scaled_scores = scores / self.temperature
+        
+        # マスクされた馬のスコアを非常に小さい値に設定
+        masked_scores = torch.where(mask, scaled_scores, torch.full_like(scaled_scores, -1e9))
+        
+        losses = []
+        
+        for batch_idx in range(batch_size):
+            batch_scores = masked_scores[batch_idx]
+            batch_rankings = rankings[batch_idx]
+            batch_mask = mask[batch_idx]
+            
+            # 有効な馬のみを取得
+            valid_horses = torch.where(batch_mask)[0]
+            if len(valid_horses) == 0:
+                continue
+                
+            valid_scores = batch_scores[valid_horses]
+            valid_rankings = batch_rankings[valid_horses]
+            
+            # 無効な着順(-1)を除外
+            valid_rank_mask = valid_rankings >= 0
+            if not valid_rank_mask.any():
+                continue
+                
+            final_horses = valid_horses[valid_rank_mask]
+            final_scores = valid_scores[valid_rank_mask]
+            final_rankings = valid_rankings[valid_rank_mask]
+            
+            if len(final_horses) <= 1:
+                continue
+            
+            # 着順でソート
+            sorted_indices = torch.argsort(final_rankings)
+            sorted_scores = final_scores[sorted_indices]
+            
+            # top_kが指定されている場合は上位k位まで
+            if self.top_k is not None:
+                k = min(self.top_k, len(sorted_scores))
+                sorted_scores = sorted_scores[:k]
+            
+            # Plackett-Luce損失を計算
+            batch_loss = 0.0
+            remaining_scores = sorted_scores.clone()
+            
+            for i in range(len(sorted_scores) - 1):
+                # i位の馬が選ばれる確率のログ
+                log_prob = remaining_scores[i] - torch.logsumexp(remaining_scores[i:], dim=0)
+                batch_loss -= log_prob
+                
+                # 次の順位のために残りのスコアを更新（実際にはもう使わないが概念的に）
+                # remaining_scores = remaining_scores[1:]  # 実際は次のループで[i+1:]を使う
+            
+            losses.append(batch_loss)
+        
+        if not losses:
+            return torch.tensor(0.0, device=scores.device, requires_grad=True)
+        
+        loss_tensor = torch.stack(losses)
+        
+        if self.reduction == 'mean':
+            return loss_tensor.mean()
+        elif self.reduction == 'sum':
+            return loss_tensor.sum()
+        else:  # 'none'
+            return loss_tensor
+
+
+class WeightedPlackettLuceLoss(nn.Module):
+    """
+    重み付きPlackett-Luce損失 - 上位の順位により大きな重みを付ける
+    
+    Args:
+        temperature: ソフトマックスの温度パラメータ
+        top_k: 上位k位までの損失を計算
+        weight_decay: 重みの減衰率（1.0で等重み、<1.0で上位重視）
+        reduction: 'mean', 'sum', 'none'
+    """
+    
+    def __init__(self, temperature: float = 1.0, top_k: Optional[int] = None, 
+                 weight_decay: float = 0.8, reduction: str = 'mean'):
+        super().__init__()
+        self.temperature = temperature
+        self.top_k = top_k
+        self.weight_decay = weight_decay
+        self.reduction = reduction
+    
+    def forward(self, scores: torch.Tensor, rankings: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        batch_size, num_horses = scores.shape
+        scaled_scores = scores / self.temperature
+        masked_scores = torch.where(mask, scaled_scores, torch.full_like(scaled_scores, -1e9))
+        
+        losses = []
+        
+        for batch_idx in range(batch_size):
+            batch_scores = masked_scores[batch_idx]
+            batch_rankings = rankings[batch_idx]
+            batch_mask = mask[batch_idx]
+            
+            valid_horses = torch.where(batch_mask)[0]
+            if len(valid_horses) == 0:
+                continue
+                
+            valid_scores = batch_scores[valid_horses]
+            valid_rankings = batch_rankings[valid_horses]
+            
+            valid_rank_mask = valid_rankings >= 0
+            if not valid_rank_mask.any():
+                continue
+                
+            final_horses = valid_horses[valid_rank_mask]
+            final_scores = valid_scores[valid_rank_mask]
+            final_rankings = valid_rankings[valid_rank_mask]
+            
+            if len(final_horses) <= 1:
+                continue
+            
+            sorted_indices = torch.argsort(final_rankings)
+            sorted_scores = final_scores[sorted_indices]
+            
+            if self.top_k is not None:
+                k = min(self.top_k, len(sorted_scores))
+                sorted_scores = sorted_scores[:k]
+            
+            # 重み付きPlackett-Luce損失を計算
+            batch_loss = 0.0
+            
+            for i in range(len(sorted_scores) - 1):
+                # i位の重み（1位が最大、下位ほど小さくなる）
+                weight = self.weight_decay ** i
+                
+                log_prob = sorted_scores[i] - torch.logsumexp(sorted_scores[i:], dim=0)
+                batch_loss -= weight * log_prob
+            
+            losses.append(batch_loss)
+        
+        if not losses:
+            return torch.tensor(0.0, device=scores.device, requires_grad=True)
+        
+        loss_tensor = torch.stack(losses)
+        
+        if self.reduction == 'mean':
+            return loss_tensor.mean()
+        elif self.reduction == 'sum':
+            return loss_tensor.sum()
+        else:
+            return loss_tensor
+
+
+class ListwiseLoss(nn.Module):
+    """
+    リストワイズランキング損失 - 全体の順序を考慮
+    
+    Args:
+        temperature: ソフトマックスの温度パラメータ
+        top_k: 上位k位までを考慮
+        reduction: 'mean', 'sum', 'none'
+    """
+    
+    def __init__(self, temperature: float = 1.0, top_k: Optional[int] = None, reduction: str = 'mean'):
+        super().__init__()
+        self.temperature = temperature
+        self.top_k = top_k
+        self.reduction = reduction
+    
+    def forward(self, scores: torch.Tensor, rankings: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        batch_size, num_horses = scores.shape
+        scaled_scores = scores / self.temperature
+        masked_scores = torch.where(mask, scaled_scores, torch.full_like(scaled_scores, -1e9))
+        
+        losses = []
+        
+        for batch_idx in range(batch_size):
+            batch_scores = masked_scores[batch_idx]
+            batch_rankings = rankings[batch_idx]
+            batch_mask = mask[batch_idx]
+            
+            valid_horses = torch.where(batch_mask)[0]
+            if len(valid_horses) == 0:
+                continue
+                
+            valid_scores = batch_scores[valid_horses]
+            valid_rankings = batch_rankings[valid_horses]
+            
+            valid_rank_mask = valid_rankings >= 0
+            if not valid_rank_mask.any():
+                continue
+                
+            final_scores = valid_scores[valid_rank_mask]
+            final_rankings = valid_rankings[valid_rank_mask]
+            
+            if len(final_scores) <= 1:
+                continue
+            
+            # top_kが指定されている場合
+            if self.top_k is not None:
+                top_k_mask = final_rankings < self.top_k
+                if not top_k_mask.any():
+                    continue
+                final_scores = final_scores[top_k_mask]
+                final_rankings = final_rankings[top_k_mask]
+            
+            # 理想的な順序での確率分布を計算
+            ideal_order = torch.argsort(final_rankings)
+            ideal_scores = final_scores[ideal_order]
+            
+            # 予測スコアによる確率分布
+            pred_probs = F.softmax(final_scores, dim=0)
+            ideal_probs = F.softmax(ideal_scores, dim=0)
+            
+            # KLダイバージェンス
+            kl_loss = F.kl_div(torch.log(pred_probs + 1e-8), ideal_probs, reduction='sum')
+            losses.append(kl_loss)
+        
+        if not losses:
+            return torch.tensor(0.0, device=scores.device, requires_grad=True)
+        
+        loss_tensor = torch.stack(losses)
+        
+        if self.reduction == 'mean':
+            return loss_tensor.mean()
+        elif self.reduction == 'sum':
+            return loss_tensor.sum()
+        else:
+            return loss_tensor
+
+
+class PairwiseRankingLoss(nn.Module):
+    """
+    ペアワイズランキング損失 - 順位の相対関係を学習
+    
+    Args:
+        margin: マージン（デフォルト1.0）
+        top_k: 上位k位までのペアを考慮
+        reduction: 'mean', 'sum', 'none'
+    """
+    
+    def __init__(self, margin: float = 1.0, top_k: Optional[int] = None, reduction: str = 'mean'):
+        super().__init__()
+        self.margin = margin
+        self.top_k = top_k
+        self.reduction = reduction
+    
+    def forward(self, scores: torch.Tensor, rankings: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        batch_size, num_horses = scores.shape
+        
+        losses = []
+        
+        for batch_idx in range(batch_size):
+            batch_scores = scores[batch_idx]
+            batch_rankings = rankings[batch_idx]
+            batch_mask = mask[batch_idx]
+            
+            valid_horses = torch.where(batch_mask)[0]
+            if len(valid_horses) == 0:
+                continue
+                
+            valid_scores = batch_scores[valid_horses]
+            valid_rankings = batch_rankings[valid_horses]
+            
+            valid_rank_mask = valid_rankings >= 0
+            if not valid_rank_mask.any():
+                continue
+                
+            final_scores = valid_scores[valid_rank_mask]
+            final_rankings = valid_rankings[valid_rank_mask]
+            
+            if len(final_scores) <= 1:
+                continue
+            
+            # top_kが指定されている場合
+            if self.top_k is not None:
+                top_k_mask = final_rankings < self.top_k
+                if not top_k_mask.any():
+                    continue
+                final_scores = final_scores[top_k_mask]
+                final_rankings = final_rankings[top_k_mask]
+            
+            # ペアワイズ損失を計算
+            batch_loss = 0.0
+            num_pairs = 0
+            
+            for i in range(len(final_scores)):
+                for j in range(len(final_scores)):
+                    if i != j:
+                        # i位の馬がj位の馬より上位の場合
+                        if final_rankings[i] < final_rankings[j]:
+                            # i位の馬のスコアがj位の馬のスコアより高くなるべき
+                            loss = torch.clamp(self.margin - (final_scores[i] - final_scores[j]), min=0)
+                            batch_loss += loss
+                            num_pairs += 1
+            
+            if num_pairs > 0:
+                batch_loss /= num_pairs
+                losses.append(batch_loss)
+        
+        if not losses:
+            return torch.tensor(0.0, device=scores.device, requires_grad=True)
+        
+        loss_tensor = torch.stack(losses)
+        
+        if self.reduction == 'mean':
+            return loss_tensor.mean()
+        elif self.reduction == 'sum':
+            return loss_tensor.sum()
+        else:
+            return loss_tensor
+
+
+class CombinedRankingLoss(nn.Module):
+    """
+    複数の損失関数を組み合わせた損失
+    
+    Args:
+        losses: 損失関数のリストと重み [(loss_fn, weight), ...]
+        reduction: 'mean', 'sum', 'none'
+    """
+    
+    def __init__(self, losses, reduction: str = 'mean'):
+        super().__init__()
+        self.losses = nn.ModuleList([loss_fn for loss_fn, _ in losses])
+        self.weights = [weight for _, weight in losses]
+        self.reduction = reduction
+    
+    def forward(self, scores: torch.Tensor, rankings: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        total_loss = 0.0
+        
+        for loss_fn, weight in zip(self.losses, self.weights):
+            loss = loss_fn(scores, rankings, mask)
+            total_loss += weight * loss
+        
+        return total_loss
+
+
+class RankNetLoss(nn.Module):
+    """
+    RankNet損失 - ニューラル情報検索で使用される損失関数
+    
+    Args:
+        temperature: シグモイドの温度パラメータ
+        top_k: 上位k位までのペアを考慮
+        reduction: 'mean', 'sum', 'none'
+    """
+    
+    def __init__(self, temperature: float = 1.0, top_k: Optional[int] = None, reduction: str = 'mean'):
+        super().__init__()
+        self.temperature = temperature
+        self.top_k = top_k
+        self.reduction = reduction
+    
+    def forward(self, scores: torch.Tensor, rankings: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        batch_size, num_horses = scores.shape
+        scaled_scores = scores / self.temperature
+        
+        losses = []
+        
+        for batch_idx in range(batch_size):
+            batch_scores = scaled_scores[batch_idx]
+            batch_rankings = rankings[batch_idx]
+            batch_mask = mask[batch_idx]
+            
+            valid_horses = torch.where(batch_mask)[0]
+            if len(valid_horses) == 0:
+                continue
+                
+            valid_scores = batch_scores[valid_horses]
+            valid_rankings = batch_rankings[valid_horses]
+            
+            valid_rank_mask = valid_rankings >= 0
+            if not valid_rank_mask.any():
+                continue
+                
+            final_scores = valid_scores[valid_rank_mask]
+            final_rankings = valid_rankings[valid_rank_mask]
+            
+            if len(final_scores) <= 1:
+                continue
+            
+            # top_kが指定されている場合
+            if self.top_k is not None:
+                top_k_mask = final_rankings < self.top_k
+                if not top_k_mask.any():
+                    continue
+                final_scores = final_scores[top_k_mask]
+                final_rankings = final_rankings[top_k_mask]
+            
+            # RankNet損失を計算
+            batch_loss = 0.0
+            num_pairs = 0
+            
+            for i in range(len(final_scores)):
+                for j in range(len(final_scores)):
+                    if i != j and final_rankings[i] != final_rankings[j]:
+                        # 順位の差を正規化したラベル
+                        if final_rankings[i] < final_rankings[j]:
+                            # i位の馬がj位の馬より上位
+                            p_ij = 1.0
+                        else:
+                            # j位の馬がi位の馬より上位
+                            p_ij = 0.0
+                        
+                        # 予測確率
+                        s_ij = torch.sigmoid(final_scores[i] - final_scores[j])
+                        
+                        # クロスエントロピー損失
+                        loss = -p_ij * torch.log(s_ij + 1e-8) - (1 - p_ij) * torch.log(1 - s_ij + 1e-8)
+                        batch_loss += loss
+                        num_pairs += 1
+            
+            if num_pairs > 0:
+                batch_loss /= num_pairs
+                losses.append(batch_loss)
+        
+        if not losses:
+            return torch.tensor(0.0, device=scores.device, requires_grad=True)
+        
+        loss_tensor = torch.stack(losses)
+        
+        if self.reduction == 'mean':
+            return loss_tensor.mean()
+        elif self.reduction == 'sum':
+            return loss_tensor.sum()
+        else:
+            return loss_tensor
