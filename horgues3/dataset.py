@@ -10,87 +10,64 @@ import pickle
 import os
 from typing import Dict, List, Optional, Union, Tuple, Any
 from datetime import datetime, timedelta
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
 
-class CustomLabelEncoder:
-    """カスタムラベルエンコーダー（0をパディング値として予約）"""
-    
-    def __init__(self):
-        self.classes_ = None
-        self.class_to_index = {}
-    
-    def fit(self, y):
-        """有効な値のみでフィット（NaN, None を無視）"""
-        # 有効な値のみを抽出
-        valid_values = []
-        for value in y:
-            if pd.isna(value) or value is None:
-                continue
-            valid_values.append(str(value))
-        
-        # ユニークな値を取得してソート
-        unique_values = sorted(list(set(valid_values)))
-        
-        # クラス一覧を保存（0は予約済みなので1から開始）
-        self.classes_ = unique_values
-        self.class_to_index = {cls: idx + 1 for idx, cls in enumerate(unique_values)}
-        
-        return self
-    
-    def transform(self, y):
-        """変換（NaN, None, 未知の値は0にマップ）"""
-        if self.classes_ is None:
-            raise ValueError("Encoder has not been fitted yet.")
-        
-        result = []
-        for value in y:
-            if pd.isna(value) or value is None:
-                result.append(0)  # パディング値
-            else:
-                str_value = str(value)
-                result.append(self.class_to_index.get(str_value, 0))  # 未知の値も0
-        
-        return np.array(result)
-    
-    def get_vocab_size(self):
-        """語彙サイズを取得（パディング用の0を含む）"""
-        if self.classes_ is None:
-            return 1  # パディング値のみ
-        return len(self.classes_) + 1  # 実際のクラス数 + パディング値
-
-
 class HorguesDataset(Dataset):
-    """レースデータセット - データ取得・前処理・データセット構築を統合"""
-    
-    def __init__(self, max_horses: int = 18):
+
+    def __init__(self, start_ymd: str, end_ymd: str, max_horses: int = 18, max_hist_len: int = 18, max_prev_days: int = 1000, hours_before_race: int = 2):
+        """
+        Args:
+            start_ymd (str): 開始日 (YYYYMMDD形式)
+            end_ymd (str): 終了日 (YYYYMMDD形式)
+            max_horses (int): 最大馬数
+            max_hist_len (int): 履歴の最大長
+            max_prev_days (int): 取得する過去の日数
+            hours_before_race (int): レース発走時刻の何時間前までの過去データを使用するか
+        """
+        super().__init__()
+
+        self.start_date = datetime.strptime(start_ymd, "%Y%m%d").date()
+        self.end_date = datetime.strptime(end_ymd, "%Y%m%d").date()
+
         self.max_horses = max_horses
-        
-    def fetch(self, start_ymd: str, end_ymd: str):
-        """レースデータを取得"""
-        logger.info(f"Fetching data from {start_ymd} to {end_ymd}...")
-        
-        # ymd形式をyyyy, mmddに分割
-        start_year = int(start_ymd[:4])
-        start_month_day = start_ymd[4:]
-        end_year = int(end_ymd[:4])
-        end_month_day = end_ymd[4:]
+        self.max_hist_len = max_hist_len
+        self.max_prev_days = max_prev_days
+
+    def fetch(self):
+        """ データベースからデータを取得する"""
+        logger.info("Fetching data from database...")
+
+        extended_start_date = self.start_date - timedelta(days=self.max_prev_days)
+
+        start_year = extended_start_date.strftime("%Y")
+        start_month_day = extended_start_date.strftime("%m%d")
+        end_year = self.end_date.strftime("%Y")
+        end_month_day = self.end_date.strftime("%m%d")
         
         engine = create_engine("postgresql://postgres:postgres@localhost/horgues3")
-        
-        # 基本レースデータを取得するSQL
+
         query = f"""
         SELECT 
             hri.kaisai_year || hri.kaisai_month_day || hri.track_code || hri.kaisai_kai || hri.kaisai_day || hri.race_number as race_id,
             hri.horse_number,
+
+            -- メタデータ
+            hri.kaisai_year || hri.kaisai_month_day as kaisai_ymd,
+            rd.start_time,
+
+            -- 数値特徴量
             hri.horse_weight,
             hri.weight_change_sign,
             hri.weight_change,
-            hri.final_order,
-            rd.weather_code,
+            rd.distance,
+
+            -- カテゴリ特徴量
             hri.blood_registration_number,
             hri.jockey_code,
+            rd.weather_code,
             CASE 
                 WHEN 
                     rd.track_code_detail BETWEEN '10' AND '22' OR
@@ -106,7 +83,9 @@ class HorguesDataset(Dataset):
                 ELSE
                     '0'
             END track_condition_code,
-            rd.distance
+
+            -- ターゲット
+            hri.final_order
         FROM public.horse_race_info hri
         INNER JOIN public.race_detail rd ON (
             hri.kaisai_year = rd.kaisai_year AND
@@ -129,222 +108,331 @@ class HorguesDataset(Dataset):
             )
         ORDER BY race_id, hri.horse_number;
         """
+
+        self.fetched_data = pd.read_sql_query(query, engine)
+        logger.info(f"Fetched {len(self.fetched_data)} records from the database.")
+        return self
+
+    def prepare(self):
+        """データの前処理を行う"""
+        logger.info("Preparing data...")
+
+        data = self.fetched_data.copy()
+
+        # ==========================================
+        # メタデータ
+        # ==========================================
+
+        # kaisai_ymd: 開催年月日をdatetime型に変換
+        data['kaisai_ymd_parsed'] = pd.to_datetime(data['kaisai_ymd'], format='%Y%m%d', errors='coerce').dt.date
+        kaisai_ymd_mask = data['kaisai_ymd'] != '00000000'
+        data.loc[~kaisai_ymd_mask, 'kaisai_ymd_parsed'] = pd.NaT
         
-        self.data = pd.read_sql_query(query, engine)
-        logger.info(f"Retrieved {len(self.data)} records.")
+        # start_time: 発走時刻をtime型に変換 (HHMM形式を想定)
+        data['start_time_parsed'] = pd.to_datetime(data['start_time'], format='%H%M', errors='coerce').dt.time
+        start_time_mask = data['start_time'] != '0000'
+        data.loc[~start_time_mask, 'start_time_parsed'] = pd.NaT
+
+        # ==========================================
+        # 数値特徴量
+        # ==========================================
+
+        # horse_weight: 馬体重
+        data['horse_weight_numeric'] = pd.to_numeric(data['horse_weight'], errors='coerce').astype(np.float32)
+        horse_weight_mask = data['horse_weight_numeric'].between(2, 998)  # 馬体重は2kgから998kgの範囲
+        data.loc[~horse_weight_mask, 'horse_weight_numeric'] = np.nan
+
+        # weight_change: 増減差
+        data['weight_change_numeric'] = pd.to_numeric(data['weight_change_sign'] + data['weight_change'], errors='coerce').astype(np.float32)
+        weight_change_mask = data['weight_change_numeric'].between(-998, 998)  # 増減差は-998から998の範囲
+        data.loc[~weight_change_mask, 'weight_change_numeric'] = np.nan
+
+        # distance: 距離
+        data['distance_numeric'] = pd.to_numeric(data['distance'], errors='coerce').astype(np.float32)
+        data.loc[data['distance_numeric'] == 0, 'distance_numeric'] = np.nan  # 距離が0のレコードは無効とする
+
+        # ==========================================
+        # カテゴリ特徴量
+        # ==========================================
+
+        # blood_registration_number: 血統登録番号
+        data['blood_registration_number_valid'] = data['blood_registration_number'].fillna("<NULL>").astype(str)
+        data.loc[data['blood_registration_number_valid'] == "0000000000", 'blood_registration_number_valid'] = "<NULL>"  # 0000000000は無効とする
+
+        # jockey_code: 騎手コード
+        data['jockey_code_valid'] = data['jockey_code'].fillna("<NULL>").astype(str)
+        data.loc[data['jockey_code_valid'] == "00000", 'jockey_code_valid'] = "<NULL>"  # 00000は無効とする
+
+        # weather_code: 天候コード
+        data['weather_code_valid'] = data['weather_code'].fillna("<NULL>").astype(str)
+        data.loc[data['weather_code_valid'] == "0", 'weather_code_valid'] = "<NULL>"  # 0は無効とする
+
+        # track_condition_code: 馬場状態コード
+        data['track_condition_code_valid'] = data['track_condition_code'].fillna("<NULL>").astype(str)
+        data.loc[data['track_condition_code_valid'] == "0", 'track_condition_code_valid'] = "<NULL>"  # 0は無効とする
+
+        # ==========================================
+        # ターゲット
+        # ==========================================
+
+        # final_order: 最終着順
+        data['final_order_numeric'] = pd.to_numeric(data['final_order'], errors='coerce').astype(np.int64) - 1  # 0-indexedに変換
+        final_order_mask = data['final_order_numeric'].between(0, self.max_horses - 1)  # 0からnum_horses-1の範囲
+        data.loc[~final_order_mask, 'final_order_numeric'] = -1  # 無効な値は-1に設定
+
+        self.prepared_data = data
+        logger.info(f"Prepared data with {len(self.prepared_data)} records.")
 
         return self
 
-    def process(self):
-        """レースデータの後処理"""
-        logger.info("Post-processing race data...")
+    def build(self):
+        """データ構造を構築する"""
+        logger.info("Building data structure...")
 
-        # 数値変換
-        self.data['horse_number_numeric'] = pd.to_numeric(self.data['horse_number'], errors='coerce')
-        self.data['final_order_numeric'] = pd.to_numeric(self.data['final_order'], errors='coerce')
-        
-        # 馬体重の処理（2～998の範囲外をNaN）
-        self.data['horse_weight_numeric'] = pd.to_numeric(self.data['horse_weight'], errors='coerce')
-        valid_weight_mask = (self.data['horse_weight_numeric'] >= 2) & (self.data['horse_weight_numeric'] <= 998)
-        self.data.loc[~valid_weight_mask, 'horse_weight_numeric'] = np.nan
-        
-        # 増減差の処理（-998～998の範囲外をNaN）
-        weight_change_str = self.data['weight_change_sign'].fillna('') + self.data['weight_change'].fillna('')
-        self.data['weight_change_numeric'] = pd.to_numeric(weight_change_str, errors='coerce')
-        valid_change_mask = (self.data['weight_change_numeric'] >= -998) & (self.data['weight_change_numeric'] <= 998)
-        self.data.loc[~valid_change_mask, 'weight_change_numeric'] = np.nan
-        
-        # 距離の数値変換
-        self.data['distance_numeric'] = pd.to_numeric(self.data['distance'], errors='coerce')
+        data = self.prepared_data
+        target_data = data[data['kaisai_ymd_parsed'].between(self.start_date, self.end_date)]
+
+        # レースIDでグループ化
+        race_groups = target_data.groupby('race_id')
+
+        # レース一覧を取得 (レースID順にソート)
+        race_ids = sorted(race_groups.groups.keys())
+        num_races = len(race_ids)
+
+        logger.info(f"Building data for {num_races} races...")
+
+        # データ構造の初期化
+        self.built_data = {
+            "x_num": {
+                "horse_weight": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
+                "weight_change": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
+                "distance": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
+            },
+            "x_cat": {
+                "blood_registration_number": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "jockey_code": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "weather_code": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "track_condition_code": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+            },
+            "sequence_data": {
+                "horse_weight_history": {
+                    "x_num": {
+                        "horse_weight": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "weight_change": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'days_before': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                    },
+                    "x_cat": {},
+                    "mask": np.zeros((num_races, self.max_horses, self.max_hist_len), dtype=bool),
+                }
+            },
+            "mask": np.zeros((num_races, self.max_horses), dtype=bool),
+            "rankings": np.full((num_races, self.max_horses), -1, dtype=np.int64),
+            'race_id': np.array(race_ids, dtype=object),
+        }
+
+        # シーケンスデータ構築に使用するグループ（ソート済みに変更）
+        horse_groups = {}
+        for name, group in data.groupby('blood_registration_number_valid'):
+            # 各馬のデータを事前にソート（kaisai_ymd_parsed, start_time_parsed の降順）
+            horse_groups[name] = group.sort_values(['kaisai_ymd_parsed', 'start_time_parsed'], ascending=False)
+
+        # 進捗報告の間隔を設定
+        progress_interval = min(1000, max(1, num_races // 10))  # 10%ごとに進捗報告
+
+        # 各レースのデータを構築
+        for race_idx, race_id in enumerate(race_ids):
+
+            # 進捗ログ出力
+            if (race_idx + 1) % progress_interval == 0 or (race_idx + 1) == num_races:
+                progress_pct = (race_idx + 1) / num_races * 100
+                logger.info(f"Processing race {race_idx + 1}/{num_races} ({progress_pct:.1f}%): {race_id}")
+
+            race_data = race_groups.get_group(race_id)
+            
+            # シーケンスデータ構築のため開催日と発走時刻を取得（最初の行から一度だけ取得）
+            first_row = race_data.iloc[0]
+            current_date = first_row['kaisai_ymd_parsed']
+            current_time = first_row['start_time_parsed']
+
+            for _, row in race_data.iterrows():
+                horse_num = int(row['horse_number']) - 1  # 0-indexedに変換
+
+                # マスク
+                self.built_data['mask'][race_idx, horse_num] = True
+
+                # 数値特徴量
+                self.built_data['x_num']['horse_weight'][race_idx, horse_num] = row['horse_weight_numeric']
+                self.built_data['x_num']['weight_change'][race_idx, horse_num] = row['weight_change_numeric']
+                self.built_data['x_num']['distance'][race_idx, horse_num] = row['distance_numeric']
+
+                # カテゴリ特徴量
+                self.built_data['x_cat']['blood_registration_number'][race_idx, horse_num] = row['blood_registration_number_valid']
+                self.built_data['x_cat']['jockey_code'][race_idx, horse_num] = row['jockey_code_valid']
+                self.built_data['x_cat']['weather_code'][race_idx, horse_num] = row['weather_code_valid']
+                self.built_data['x_cat']['track_condition_code'][race_idx, horse_num] = row['track_condition_code_valid']
+
+                # ターゲット
+                self.built_data['rankings'][race_idx, horse_num] = row['final_order_numeric']
+
+                # シーケンスデータ構築時に使用するキー
+                horse_id = row['blood_registration_number_valid']  
+
+                # 馬体重履歴データの構築
+                if horse_id != "<NULL>" and horse_id in horse_groups:
+                    history = horse_groups[horse_id]
+
+                    # 過去のデータのみフィルタ（既にソート済みなので効率的）
+                    valid_history = history[
+                        (history['kaisai_ymd_parsed'] < current_date) | 
+                        ((history['kaisai_ymd_parsed'] == current_date) & (history['start_time_parsed'] < current_time))
+                    ].head(self.max_hist_len)  # 既にソート済みなのでheadで十分
+                    
+                    valid_length = len(valid_history)
+                    if valid_length > 0:
+                        days_before = np.array([(current_date - date).days for date in valid_history['kaisai_ymd_parsed']], dtype=np.float32)
+                        self.built_data['sequence_data']['horse_weight_history']['x_num']['horse_weight'][race_idx, horse_num, :valid_length] = valid_history['horse_weight_numeric'].values
+                        self.built_data['sequence_data']['horse_weight_history']['x_num']['weight_change'][race_idx, horse_num, :valid_length] = valid_history['weight_change_numeric'].values
+                        self.built_data['sequence_data']['horse_weight_history']['x_num']['days_before'][race_idx, horse_num, :valid_length] = days_before
+                        self.built_data['sequence_data']['horse_weight_history']['mask'][race_idx, horse_num, :valid_length] = True
+
+        logger.info("Data structure construction completed successfully.")
+        return self
+
+    def fit(self):
+        self.params = {'numerical': {}, 'categorical': {}, 'aliases': {}}  # エイリアスはここで設定する
+
+        # 特徴量の収集
+        feature_values = {'numerical': defaultdict(lambda: np.full(0, np.nan, dtype=np.float32)), 'categorical': defaultdict(lambda: np.full(0, "<NULL>", dtype=object))}
+        for name, data in self.built_data['x_num'].items():
+            alias = self.params['aliases'].get(name, name)
+            feature_values['numerical'][alias] = np.concatenate([feature_values['numerical'][alias], data.reshape(-1)])
+        for name, data in self.built_data['x_cat'].items():
+            alias = self.params['aliases'].get(name, name)
+            feature_values['categorical'][alias] = np.concatenate([feature_values['categorical'][alias], data.reshape(-1)])
+        for seq_data in self.built_data['sequence_data'].values():
+            for name, data in seq_data['x_num'].items():
+                alias = self.params['aliases'].get(name, name)
+                feature_values['numerical'][alias] = np.concatenate([feature_values['numerical'][alias], data.reshape(-1)])
+            for name, data in seq_data['x_cat'].items():
+                alias = self.params['aliases'].get(name, name)
+                feature_values['categorical'][alias] = np.concatenate([feature_values['categorical'][alias], data.reshape(-1)])
+
+        # 数値特徴量のパラメータ取得
+        for name, data in feature_values['numerical'].items():
+            mean = np.nanmean(data)
+            std = np.nanstd(data)
+            self.params['numerical'][name] = {'mean': mean, 'std': std}
+            logger.info(f"Numerical feature '{name}' has mean: {mean}, std: {std}")
+
+        # カテゴリ特徴量のエンコーダ作成
+        for name, data in feature_values['categorical'].items():
+            unique_values = np.unique(data)
+            valid_values = unique_values[unique_values != "<NULL>"]
+            encoder = {"<NULL>": 0}
+            for i, value in enumerate(sorted(valid_values), start=1):
+                encoder[value] = i
+            decoder = {v: k for k, v in encoder.items()}
+            self.params['categorical'][name] = {
+                'encoder': encoder,
+                'decoder': decoder,
+                'num_classes': len(encoder)
+            }
+            logger.info(f"Categorical feature '{name}' has {len(encoder)} classes")
 
         return self
-        
-    
-    def fit(self) -> 'HorguesDataset':
-        """前処理器をフィット"""
-        logger.info("Fitting preprocessors...")
 
-        # 特徴量のエイリアス (複数の特徴量に同じ処理を適用したい場合)
-        # 特徴量名 -> エイリアス名
-        self.feature_aliases = {
-        }
-        
-        # 数値特徴量の前処理器
-        numerical_features = [
-            'horse_weight_numeric', 
-            'weight_change_numeric',
-            'distance_numeric'
-        ]
-        
-        self.numerical_scalers = {}
-        for feature in numerical_features:
-            if feature in self.data.columns:
-                scaler_name = self.feature_aliases.get(feature, feature)
-                scaler = StandardScaler().fit(self.data[feature].dropna().values.reshape(-1, 1))
-                self.numerical_scalers[scaler_name] = scaler
-
-        # カテゴリ特徴量の前処理器
-        categorical_features = [
-            'weather_code',
-            'track_condition_code', 
-            'blood_registration_number',
-            'jockey_code'
-        ]
-        
-        self.categorical_encoders = {}
-        for feature in categorical_features:
-            if feature in self.data.columns:
-                encoder_name = self.feature_aliases.get(feature, feature)
-                encoder = CustomLabelEncoder().fit(self.data[feature])
-                self.categorical_encoders[encoder_name] = encoder
-        
-        logger.info("Preprocessors fitted successfully.")
-        return self
-    
-    def get_numerical_features(self) -> List[str]:
-        """数値特徴量のリストを取得（正規化後の名前）"""
-        return [f'{feature}' for feature in self.numerical_scalers.keys()]
-    
-    def get_categorical_features(self) -> Dict[str, int]:
-        """カテゴリ特徴量の辞書を取得（エンコード後の名前とvocab_size）"""
-        return {
-            f'{feature}': encoder.get_vocab_size() 
-            for feature, encoder in self.categorical_encoders.items()
-        }
-    
-    def get_feature_configs(self) -> Dict[str, Any]:
-        """モデル構築に必要な特徴量設定を取得"""
-        return {
-            'numerical_features': self.get_numerical_features(),
-            'categorical_features': self.get_categorical_features(),
-            'feature_aliases': self.feature_aliases,
-            'max_horses': self.max_horses,
-        }
-    
     def transform(self):
-        """データの前処理を実行"""
-        logger.info("Applying preprocessing...")
+        """データの変換を行う（標準化・エンコーディング）"""
+        logger.info("Transforming data...")
         
-        processed_data = self.data.copy()
+        # built_dataをコピーしてtransformed_dataを作成
+        self.transformed_data = {
+            "x_num": {},
+            "x_cat": {},
+            "sequence_data": {},
+            "mask": self.built_data['mask'].copy(),
+            "rankings": self.built_data['rankings'].copy(),
+            "race_id": self.built_data['race_id'].copy(),
+        }
         
-        # 数値特徴量の標準化
-        for feature, scaler in self.numerical_scalers.items():
-            if feature in processed_data.columns:
-                feature_data = processed_data[feature].values.reshape(-1, 1)
-                normalized_values = scaler.transform(feature_data)
-                processed_data[f'{feature}_normalized'] = normalized_values.flatten()
+        def _transform_numerical_features(data: Dict[str, np.ndarray], feature_params: Dict[str, Dict[str, float]]) -> Dict[str, np.ndarray]:
+            """数値特徴量の標準化を行う内部メソッド"""
+            transformed = {}
+            for name, values in data.items():
+                alias = self.params.get('aliases', {}).get(name, name)
+                mean = feature_params[alias]['mean']
+                std = feature_params[alias]['std']
+                # 標準化（stdが0の場合は0で埋める）
+                if std > 0:
+                    transformed[name] = ((values - mean) / std).astype(np.float32)
+                else:
+                    transformed[name] = np.zeros_like(values, dtype=np.float32)
+            return transformed
         
-        # カテゴリ特徴量のエンコード
-        for feature, encoder in self.categorical_encoders.items():
-            if feature in processed_data.columns:
-                encoded_values = encoder.transform(processed_data[feature])
-                processed_data[f'{feature}_encoded'] = encoded_values
+        def _transform_categorical_features(data: Dict[str, np.ndarray], feature_params: Dict[str, Dict[str, Any]]) -> Dict[str, np.ndarray]:
+            """カテゴリ特徴量のエンコーディングを行う内部メソッド"""
+            transformed = {}
+            for name, values in data.items():
+                alias = self.params.get('aliases', {}).get(name, name)
+                encoder = feature_params[alias]['encoder']
+                # エンコーディング（未知の値は<NULL>として扱う）
+                encoded_values = np.array([encoder.get(str(val), encoder["<NULL>"]) for val in values.flatten()])
+                transformed[name] = encoded_values.reshape(values.shape).astype(np.int64)
+            return transformed
         
-        self.data = processed_data
+        # 通常の特徴量の変換
+        self.transformed_data['x_num'] = _transform_numerical_features(
+            self.built_data['x_num'], 
+            self.params['numerical']
+        )
+        self.transformed_data['x_cat'] = _transform_categorical_features(
+            self.built_data['x_cat'], 
+            self.params['categorical']
+        )
+        
+        # シーケンスデータの変換
+        for seq_name, seq_data in self.built_data['sequence_data'].items():
+            self.transformed_data['sequence_data'][seq_name] = {
+                'x_num': _transform_numerical_features(
+                    seq_data['x_num'], 
+                    self.params['numerical']
+                ),
+                'x_cat': _transform_categorical_features(
+                    seq_data['x_cat'], 
+                    self.params['categorical']
+                ),
+                'mask': seq_data['mask'].copy()
+            }
+        
+        logger.info("Data transformation completed successfully.")
         return self
-    
-    def build_races(self):
-        """レースサンプルを構築"""
-        logger.info("Building race samples...")
-        
-        races = []
-        
-        for race_id, race_group in self.data.groupby('race_id'):
-            race_sample = self._build_single_race(race_id, race_group)
-            races.append(race_sample)
-        
-        logger.info(f"Built {len(races)} race samples.")
-        self.races = races
 
-        return self
+    def get_params(self) -> Dict[str, Any]:
+        return self.params
     
-    def _build_single_race(self, race_id: str, race_group: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        """単一レースのデータを構築"""
-        # 馬番を取得してインデックスに変換
-        horse_numbers = race_group['horse_number_numeric'].values
-        horse_indices = horse_numbers - 1  # 馬番-1をインデックスに
-        
-        # 有効な馬番のチェック
-        if np.any((horse_indices < 0) | (horse_indices >= self.max_horses)):
-            raise ValueError(f"Invalid horse numbers {horse_numbers} at race {race_id}")
+    def set_params(self, params):
+        self.params = params
+        return self
 
-        # 数値特徴量を構築
-        x_num = {}
-        for feature in self.get_numerical_features():
-            if feature in race_group.columns:
-                # NaNで初期化
-                feature_array = np.full(self.max_horses, np.nan, dtype=np.float32)
-                feature_array[horse_indices] = race_group[f"{feature}_normalized"].values
-                x_num[feature] = torch.tensor(feature_array, dtype=torch.float32)
-        
-        # カテゴリ特徴量を構築
-        x_cat = {}
-        for feature in list(self.get_categorical_features().keys()):
-            if feature in race_group.columns:
-                # 0で初期化（パディング値）
-                feature_array = np.zeros(self.max_horses, dtype=np.int64)
-                feature_array[horse_indices] = race_group[f"{feature}_encoded"].values
-                x_cat[feature] = torch.tensor(feature_array, dtype=torch.long)
-        
-        # 着順を構築
-        rankings = np.full(self.max_horses, -1, dtype=np.int32)
-        
-        # 着順を設定（1位=0, 2位=1, ...）
-        final_orders = race_group['final_order_numeric'].values
-        rankings[horse_indices] = final_orders - 1
-        
-        # マスクを構築
-        mask = np.zeros(self.max_horses, dtype=bool)
-        mask[horse_indices] = True
-        
-        # メタデータを取得
-        first_row = race_group.iloc[0]
-        metadata = {
-            'weather_code': first_row.get('weather_code'),
-            'track_condition_code': first_row.get('track_condition_code'),
-            'distance': first_row.get('distance_numeric'),
-        }
-        
+    def __len__(self) -> int:
+        """データセットの長さを返す"""
+        return len(self.transformed_data['race_id'])
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """指定されたインデックスのデータを返す"""
+        data = self.transformed_data
         return {
-            'race_id': race_id,
-            'x_num': x_num,
-            'x_cat': x_cat,
-            'rankings': torch.tensor(rankings, dtype=torch.long),
-            'mask': torch.tensor(mask, dtype=torch.bool),
-            'num_horses': len(horse_indices),
-            'metadata': metadata
+            "x_num": {feat_name: feat_data[idx] for feat_name, feat_data in data['x_num'].items()},
+            "x_cat": {feat_name: feat_data[idx] for feat_name, feat_data in data['x_cat'].items()},
+            "sequence_data": {
+                seq_name: {
+                    "x_num": {feat_name: feat_data[idx] for feat_name, feat_data in seq_data["x_num"].items()},
+                    "x_cat": {feat_name: feat_data[idx] for feat_name, feat_data in seq_data["x_cat"].items()},
+                    "mask": seq_data["mask"][idx],
+                } for seq_name, seq_data in data['sequence_data'].items()
+            },
+            "mask": data['mask'][idx],
+            "rankings": data['rankings'][idx],
+            "race_id": data['race_id'][idx],
         }
-    
-    def get_preprocessors(self) -> Dict[str, Any]:
-        """前処理器を取得"""
-        return {
-            'numerical_scalers': self.numerical_scalers,
-            'categorical_encoders': self.categorical_encoders
-        }
-    
-    def set_preprocessors(self, preprocessors: Dict[str, Any]) -> 'HorguesDataset':
-        """前処理器を設定"""
-        self.numerical_scalers = preprocessors.get('numerical_scalers', {})
-        self.categorical_encoders = preprocessors.get('categorical_encoders', {})
-        return self
-    
-    def save_preprocessors(self, filepath: str):
-        """前処理器を保存"""
-        with open(filepath, 'wb') as f:
-            pickle.dump(self.get_preprocessors(), f)
-        logger.info(f"Preprocessors saved to {filepath}")
-    
-    def load_preprocessors(self, filepath: str) -> 'HorguesDataset':
-        """前処理器を読み込み"""
-        with open(filepath, 'rb') as f:
-            preprocessors = pickle.load(f)
-        self.set_preprocessors(preprocessors)
-        logger.info(f"Preprocessors loaded from {filepath}")
-        return self
-    
-    def __len__(self):
-        return len(self.races)
-    
-    def __getitem__(self, idx):
-        return self.races[idx]
 

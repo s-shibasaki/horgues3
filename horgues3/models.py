@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import List, Optional, Union, Dict
+from typing import List, Optional, Union, Dict, Any
 from itertools import permutations
 import logging
 
@@ -368,10 +368,7 @@ class HorguesModel(nn.Module):
     """統合された競馬予測モデル"""
 
     def __init__(self, 
-                 numerical_features: List[str],
-                 categorical_features: Dict[str, int],
-                 feature_aliases: Dict[str, str],
-                 sequence_configs: Dict[str, Dict] = None,
+                 dataset_params: Dict[str, Any],
                  d_token: int = 192,
                  num_bins: int = 10,
                  binning_temperature: float = 1.0,
@@ -390,16 +387,19 @@ class HorguesModel(nn.Module):
         super().__init__()
         self.d_token = d_token
         self.max_horses = max_horses
-        self.numerical_features = numerical_features
-        self.categorical_features = categorical_features
-        self.feature_aliases = feature_aliases
-        self.sequence_configs = sequence_configs or {}
+
+        # dataset_params から必要な情報を抽出
+        self.numerical_features = list(dataset_params['numerical'].keys())
+        self.categorical_features = {name: config['num_classes'] for name, config in dataset_params['categorical'].items()}
+        self.feature_aliases = dataset_params['aliases']
+
+        self.sequences = ['horse_weight_hist']
 
         # 共通のFeatureTokenizer（SoftBinning対応）
         self.tokenizer = FeatureTokenizer(
-            numerical_features=numerical_features,
-            categorical_features=categorical_features,
-            feature_aliases=feature_aliases,
+            numerical_features=self.numerical_features,
+            categorical_features=self.categorical_features,
+            feature_aliases=self.feature_aliases,
             d_token=d_token,
             num_bins=num_bins,
             binning_temperature=binning_temperature,
@@ -409,23 +409,23 @@ class HorguesModel(nn.Module):
 
         # 時系列用のFTTransformer (特徴量統合用)
         self.sequence_ft_transformers = nn.ModuleDict()
-        for seq_name, seq_config in self.sequence_configs.items():
+        for seq_name in self.sequences:
             self.sequence_ft_transformers[seq_name] = SequenceTransformer(
                 d_token=d_token,
-                n_layers=seq_config.get('ft_n_layers', ft_n_layers),
-                n_heads=seq_config.get('ft_n_heads', ft_n_heads),
-                d_ffn=seq_config.get('ft_d_ffn', ft_d_ffn),
+                n_layers=ft_n_layers,
+                n_heads=ft_n_heads,
+                d_ffn=ft_d_ffn,
                 dropout=dropout
             )
 
         # 時系列用のSequenceTransformer (時系列処理用)
         self.sequence_transformers = nn.ModuleDict()
-        for seq_name, seq_config in self.sequence_configs.items():
+        for seq_name in self.sequences:
             self.sequence_transformers[seq_name] = SequenceTransformer(
                 d_token=d_token,
-                n_layers=seq_config.get('seq_n_layers', seq_n_layers),
-                n_heads=seq_config.get('seq_n_heads', seq_n_heads),
-                d_ffn=seq_config.get('seq_d_ffn', seq_d_ffn),
+                n_layers=seq_n_layers,
+                n_heads=seq_n_heads,
+                d_ffn=seq_d_ffn,
                 dropout=dropout
             )
 
