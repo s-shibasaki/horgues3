@@ -163,6 +163,11 @@ class HorguesDataset(Dataset):
     def fit(self) -> 'HorguesDataset':
         """前処理器をフィット"""
         logger.info("Fitting preprocessors...")
+
+        # 特徴量のエイリアス (複数の特徴量に同じ処理を適用したい場合)
+        # 特徴量名 -> エイリアス名
+        self.feature_aliases = {
+        }
         
         # 数値特徴量の前処理器
         numerical_features = [
@@ -174,12 +179,10 @@ class HorguesDataset(Dataset):
         self.numerical_scalers = {}
         for feature in numerical_features:
             if feature in self.data.columns:
-                scaler = StandardScaler()
-                valid_data = self.data[feature].dropna().values.reshape(-1, 1)
-                if len(valid_data) > 0:
-                    scaler.fit(valid_data)
-                    self.numerical_scalers[feature] = scaler
-        
+                scaler_name = self.feature_aliases.get(feature, feature)
+                scaler = StandardScaler().fit(self.data[feature].dropna().values.reshape(-1, 1))
+                self.numerical_scalers[scaler_name] = scaler
+
         # カテゴリ特徴量の前処理器
         categorical_features = [
             'weather_code',
@@ -191,21 +194,21 @@ class HorguesDataset(Dataset):
         self.categorical_encoders = {}
         for feature in categorical_features:
             if feature in self.data.columns:
-                encoder = CustomLabelEncoder()
-                encoder.fit(self.data[feature])
-                self.categorical_encoders[feature] = encoder
+                encoder_name = self.feature_aliases.get(feature, feature)
+                encoder = CustomLabelEncoder().fit(self.data[feature])
+                self.categorical_encoders[encoder_name] = encoder
         
         logger.info("Preprocessors fitted successfully.")
         return self
     
     def get_numerical_features(self) -> List[str]:
         """数値特徴量のリストを取得（正規化後の名前）"""
-        return [f'{feature}_normalized' for feature in self.numerical_scalers.keys()]
+        return [f'{feature}' for feature in self.numerical_scalers.keys()]
     
     def get_categorical_features(self) -> Dict[str, int]:
         """カテゴリ特徴量の辞書を取得（エンコード後の名前とvocab_size）"""
         return {
-            f'{feature}_encoded': encoder.get_vocab_size() 
+            f'{feature}': encoder.get_vocab_size() 
             for feature, encoder in self.categorical_encoders.items()
         }
     
@@ -214,7 +217,8 @@ class HorguesDataset(Dataset):
         return {
             'numerical_features': self.get_numerical_features(),
             'categorical_features': self.get_categorical_features(),
-            'max_horses': self.max_horses
+            'feature_aliases': self.feature_aliases,
+            'max_horses': self.max_horses,
         }
     
     def transform(self):
@@ -270,7 +274,7 @@ class HorguesDataset(Dataset):
             if feature in race_group.columns:
                 # NaNで初期化
                 feature_array = np.full(self.max_horses, np.nan, dtype=np.float32)
-                feature_array[horse_indices] = race_group[feature].values
+                feature_array[horse_indices] = race_group[f"{feature}_normalized"].values
                 x_num[feature] = torch.tensor(feature_array, dtype=torch.float32)
         
         # カテゴリ特徴量を構築
@@ -279,7 +283,7 @@ class HorguesDataset(Dataset):
             if feature in race_group.columns:
                 # 0で初期化（パディング値）
                 feature_array = np.zeros(self.max_horses, dtype=np.int64)
-                feature_array[horse_indices] = race_group[feature].values
+                feature_array[horse_indices] = race_group[f"{feature}_encoded"].values
                 x_cat[feature] = torch.tensor(feature_array, dtype=torch.long)
         
         # 着順を構築

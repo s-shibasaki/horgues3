@@ -98,29 +98,33 @@ class SoftBinnedLinear(nn.Module):
 class FeatureTokenizer(nn.Module):
     """数値特徴量とカテゴリ特徴量をトークン化（共通利用）"""
 
-    def __init__(self, numerical_features: List[str], categorical_features: Dict[str, int], 
+    def __init__(self, numerical_features: List[str], categorical_features: Dict[str, int], feature_aliases: Dict[str, str],
                  d_token: int = 192, num_bins: int = 10, binning_temperature: float = 1.0,
                  binning_init_range: float = 3.0, dropout: float = 0.1):
         super().__init__()
         self.d_token = d_token
         self.numerical_features = numerical_features
         self.categorical_features = categorical_features
+        self.feature_aliases = feature_aliases
 
         # 数値特徴量用のSoftBinnedLinear（特徴量ごとに個別）
-        self.numerical_tokenizers = nn.ModuleDict({
-            name: SoftBinnedLinear(
-                num_bins=num_bins,
-                d_token=d_token,
-                temperature=binning_temperature,
-                init_range=binning_init_range,
-            ) for name in numerical_features
-        })
+        self.numerical_tokenizers = nn.ModuleDict()
+        for feature in numerical_features:
+            tokenizer_name = self.feature_aliases.get(feature, feature)
+            if tokenizer_name not in self.numerical_tokenizers:
+                self.numerical_tokenizers[tokenizer_name] = SoftBinnedLinear(
+                    num_bins=num_bins,
+                    d_token=d_token,
+                    temperature=binning_temperature,
+                    init_range=binning_init_range,
+                )
 
         # カテゴリ特徴量用の埋め込み
-        self.categorical_tokenizers = nn.ModuleDict({
-            name: nn.Embedding(vocab_size, d_token, padding_idx=0) 
-            for name, vocab_size in categorical_features.items()
-        })
+        self.categorical_tokenizers = nn.ModuleDict()
+        for feature, vocab_size in categorical_features.items():
+            tokenizer_name = self.feature_aliases.get(feature, feature)
+            if tokenizer_name not in self.categorical_tokenizers:
+                self.categorical_tokenizers[tokenizer_name] = nn.Embedding(vocab_size, d_token, padding_idx=0) 
 
         self.norm = nn.LayerNorm(d_token)
         self.dropout = nn.Dropout(dropout)
@@ -138,29 +142,29 @@ class FeatureTokenizer(nn.Module):
 
         # 数値特徴量のトークン化
         if x_num is not None:
-            for name in self.numerical_features:
-                if name in x_num:
-                    feature_values = x_num[name]  # 任意の形状
-                    
-                    # NaN処理
-                    nan_mask = torch.isnan(feature_values)
-                    clean_values = torch.where(nan_mask, torch.zeros_like(feature_values), feature_values)
-                    
-                    # SoftBinnedLinearで変換
-                    token = self.numerical_tokenizers[name](clean_values)  # (..., d_token)
+            for name, feature_values in x_num.items():
+                tokenizer_name = self.feature_aliases.get(name, name)
+                tokenizer = self.numerical_tokenizers[tokenizer_name]
+                
+                # NaN処理
+                nan_mask = torch.isnan(feature_values)
+                clean_values = torch.where(nan_mask, torch.zeros_like(feature_values), feature_values)
+                
+                # SoftBinnedLinearで変換
+                token = tokenizer(clean_values)  # (..., d_token)
 
-                    # NaN位置のトークンをゼロにする
-                    nan_mask = nan_mask.unsqueeze(-1)  # (..., 1)
-                    token = torch.where(nan_mask, torch.zeros_like(token), token)
-                    tokens.append(token)
+                # NaN位置のトークンをゼロにする
+                nan_mask = nan_mask.unsqueeze(-1)  # (..., 1)
+                token = torch.where(nan_mask, torch.zeros_like(token), token)
+                tokens.append(token)
 
         # カテゴリ特徴量のトークン化
         if x_cat is not None:
-            for name in self.categorical_features.keys():
-                if name in x_cat:
-                    feature_values = x_cat[name]  # 任意の形状
-                    token = self.categorical_tokenizers[name](feature_values)  # (..., d_token)
-                    tokens.append(token)
+            for name, feature_values in x_cat.items():
+                tokenizer_name = self.feature_aliases.get(name, name)
+                tokenizer = self.categorical_tokenizers[tokenizer_name]
+                token = tokenizer(feature_values)  # (..., d_token)
+                tokens.append(token)
 
         # トークンを結合
         result = torch.stack(tokens, dim=-2)  # (..., num_tokens, d_token)
@@ -366,6 +370,7 @@ class HorguesModel(nn.Module):
     def __init__(self, 
                  numerical_features: List[str],
                  categorical_features: Dict[str, int],
+                 feature_aliases: Dict[str, str],
                  sequence_configs: Dict[str, Dict] = None,
                  d_token: int = 192,
                  num_bins: int = 10,
@@ -387,12 +392,14 @@ class HorguesModel(nn.Module):
         self.max_horses = max_horses
         self.numerical_features = numerical_features
         self.categorical_features = categorical_features
+        self.feature_aliases = feature_aliases
         self.sequence_configs = sequence_configs or {}
 
         # 共通のFeatureTokenizer（SoftBinning対応）
         self.tokenizer = FeatureTokenizer(
             numerical_features=numerical_features,
             categorical_features=categorical_features,
+            feature_aliases=feature_aliases,
             d_token=d_token,
             num_bins=num_bins,
             binning_temperature=binning_temperature,
