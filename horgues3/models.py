@@ -327,15 +327,8 @@ class RaceTransformer(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         # スコア計算ヘッド
-        self.score_head = nn.Sequential(
-            nn.Linear(d_token, d_token // 2),
-            nn.GELU(),
-            nn.Linear(d_token // 2, 1)
-        )
+        self.score_head = nn.Linear(d_token, 1)
 
-        # 出力層にマークを付ける
-        self.score_head[-1]._is_output_layer = True
-        
     def forward(self, horse_vectors: torch.Tensor, mask: Optional[torch.Tensor] = None):
         """
         Args:
@@ -374,15 +367,18 @@ class HorguesModel(nn.Module):
                  numerical_features: List[str],
                  categorical_features: Dict[str, int],
                  sequence_configs: Dict[str, Dict] = None,
-                 d_token: int = 96,
+                 d_token: int = 192,
                  num_bins: int = 10,
                  binning_temperature: float = 1.0,
                  binning_init_range: float = 3.0,
-                 seq_n_layers: int = 2,
-                 seq_n_heads: int = 4,
+                 ft_n_layers: int = 3,
+                 ft_n_heads: int = 8,
+                 ft_d_ffn: int = None,
+                 seq_n_layers: int = 3,
+                 seq_n_heads: int = 8,
                  seq_d_ffn: int = None,
-                 race_n_layers: int = 2,
-                 race_n_heads: int = 4,
+                 race_n_layers: int = 3,
+                 race_n_heads: int = 8,
                  race_d_ffn: int = None,
                  dropout: float = 0.3,
                  max_horses: int = 18):
@@ -404,6 +400,17 @@ class HorguesModel(nn.Module):
             dropout=dropout
         )
 
+        # 時系列用のFTTransformer (特徴量統合用)
+        self.sequence_ft_transformers = nn.ModuleDict()
+        for seq_name, seq_config in self.sequence_configs.items():
+            self.sequence_ft_transformers[seq_name] = SequenceTransformer(
+                d_token=d_token,
+                n_layers=seq_config.get('ft_n_layers', ft_n_layers),
+                n_heads=seq_config.get('ft_n_heads', ft_n_heads),
+                d_ffn=seq_config.get('ft_d_ffn', ft_d_ffn),
+                dropout=dropout
+            )
+
         # 時系列用のSequenceTransformer (時系列処理用)
         self.sequence_transformers = nn.ModuleDict()
         for seq_name, seq_config in self.sequence_configs.items():
@@ -415,6 +422,23 @@ class HorguesModel(nn.Module):
                 dropout=dropout
             )
 
+        self.general_ft_transformer = SequenceTransformer(
+            d_token=d_token,
+            n_layers=ft_n_layers,
+            n_heads=ft_n_heads,
+            d_ffn=ft_d_ffn,
+            dropout=dropout
+        )
+
+        # 最終統合用のFTTransformer
+        self.final_ft_transformer = SequenceTransformer(
+            d_token=d_token,
+            n_layers=ft_n_layers,
+            n_heads=ft_n_heads,
+            d_ffn=ft_d_ffn,
+            dropout=dropout
+        )
+
         # Race Transformer (レース内相互作用用)
         self.race_transformer = RaceTransformer(
             d_token=d_token,
@@ -423,38 +447,6 @@ class HorguesModel(nn.Module):
             d_ffn=race_d_ffn,
             dropout=dropout
         )
-
-        # 重み初期化を追加
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        """重みの初期化を改善"""
-        if isinstance(module, nn.Linear):
-            if hasattr(module, '_is_output_layer') and module._is_output_layer:
-                # 出力層は非常に小さい値で初期化（安定化のため）
-                nn.init.normal_(module.weight, mean=0.0, std=0.01)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-            else:
-                # 中間層はXavier初期化
-                nn.init.xavier_uniform_(module.weight, gain=1.0)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-                    
-        elif isinstance(module, nn.Embedding):
-            # 埋め込み層の初期化
-            nn.init.normal_(module.weight, std=0.1)
-            if hasattr(module, 'padding_idx') and module.padding_idx is not None:
-                with torch.no_grad():
-                    module.weight[module.padding_idx].fill_(0.0)
-                    
-        elif isinstance(module, nn.LayerNorm):
-            nn.init.ones_(module.weight)
-            nn.init.zeros_(module.bias)
-            
-        elif isinstance(module, nn.Parameter):
-            # CLSトークンなどのパラメータ
-            nn.init.normal_(module, std=0.1)
 
     def forward(self,
                 x_num: Dict[str, torch.Tensor],
@@ -508,8 +500,12 @@ class HorguesModel(nn.Module):
                 
                 # 各時系列ステップの特徴量を統合
                 if seq_tokens.size(-2) > 0:  # 特徴量が存在する場合
-                    # 全てのトークンを合計して1つの特徴量にする
-                    step_features = seq_tokens.sum(dim=-2)  # (batch_size, seq_len, d_token)
+                    batch_size_seq, seq_len, num_features, d_token = seq_tokens.shape
+                    seq_tokens_reshaped = seq_tokens.view(batch_size_seq * seq_len, num_features, d_token)
+                    
+                    # FTTransformerで各時系列ステップの特徴量を統合
+                    step_features = self.sequence_ft_transformers[seq_name](seq_tokens_reshaped)  # (batch_size * seq_len, d_token)
+                    step_features = step_features.view(batch_size_seq, seq_len, d_token)  # (batch_size, seq_len, d_token)
                     
                     # SequenceTransformerで時系列を処理
                     seq_feature = self.sequence_transformers[seq_name](step_features, seq_mask)  # (batch_size, d_token)
@@ -530,15 +526,14 @@ class HorguesModel(nn.Module):
             
             # 一般データの特徴量を統合
             if general_tokens.size(-2) > 0:  # 特徴量が存在する場合
-                # 全てのトークンを合計して1つの特徴量にする
-                general_feature = general_tokens.sum(dim=-2)  # (batch_size, d_token)
+                general_feature = self.general_ft_transformer(general_tokens)  # (batch_size, d_token)
                 sequence_features.append(general_feature)
 
             # 3. 最終統合
             if sequence_features:
                 # 全ての特徴量を統合
                 all_features = torch.stack(sequence_features, dim=1)  # (batch_size, num_feature_types, d_token)
-                horse_feature = all_features.sum(dim=-2)  # (batch_size, d_token)
+                horse_feature = self.final_ft_transformer(all_features)  # (batch_size, d_token)
             else:
                 # 特徴量がない場合はゼロベクトル
                 horse_feature = torch.zeros(batch_size, self.d_token, device=next(self.parameters()).device)
