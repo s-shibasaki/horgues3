@@ -93,6 +93,9 @@ namespace JVDataCollector
                         case "update":
                             ExecuteUpdate();
                             break;
+                        case "today":
+                            ExecuteToday();
+                            break;
                         default:
                             throw new ArgumentException($"Unknown command: {command}");
                     }
@@ -115,6 +118,144 @@ namespace JVDataCollector
             {
                 Application.Exit();
             }
+        }
+
+        private void ExecuteToday()
+        {
+            Console.WriteLine("Executing today process...");
+
+            Console.WriteLine("Initializing JVLink...");
+            int result = axJVLink1.JVInit(sid);
+            if (result != 0)
+            {
+                throw new InvalidOperationException($"JVInit failed with error code: {result}");
+            }
+            Console.WriteLine("JVLink initialized successfully.");
+
+            using (var connection = new NpgsqlConnection(connectionString))
+            {
+                connection.Open();
+
+                string today = DateTime.Now.ToString("yyyyMMdd");
+                Console.WriteLine($"Processing realtime data for date: {today}");
+
+                // 開催日単位で取得するデータ種別ID
+                string[] dailyDataSpecs = { "0B11", "0B12", "0B13", "0B14", "0B17", "0B51" };
+                foreach (string dataSpec in dailyDataSpecs)
+                {
+                    Console.WriteLine($"Processing daily data: {dataSpec}");
+                    ProcessRealtimeData(dataSpec, today, connection);
+                }
+
+                // レース毎に取得するデータ種別ID
+                string[] raceDataSpecs = { "0B20", "0B33", "0B34", "0B35", "0B36", "0B41", "0B42" };
+                var raceIds = GetTodayRaceIds(connection, today);
+                foreach (string raceId in raceIds)
+                {
+                    Console.WriteLine($"Processing race data for race: {raceId}");
+
+                    foreach (string dataSpec in raceDataSpecs)
+                    {
+                        Console.WriteLine($"  Processing race data: {dataSpec}");
+                        ProcessRealtimeData(dataSpec, raceId, connection);
+                    }
+                }
+
+                // バッファに残っているデータをフラッシュ
+                FlushAllBuffers(connection);
+            }
+
+            Console.WriteLine("Today process completed.");
+        }
+
+        private List<string> GetTodayRaceIds(NpgsqlConnection connection, string today)
+        {
+            var raceIds = new List<string>();
+
+            var sql = @"
+                SELECT DISTINCT
+                    kaisai_year || kaisai_month_day || track_code || kaisai_kai || kaisai_day || race_number AS race_id
+                FROM race_detail
+                WHERE kaisai_year || kaisai_month_day = @today
+                ORDER BY race_id";
+
+            using (var command = new NpgsqlCommand(sql, connection))
+            {
+                command.Parameters.AddWithValue("@today", today);
+
+                using (var reader = command.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        raceIds.Add(reader.GetString(reader.GetOrdinal("race_id")));
+                    }
+                }
+            }
+
+            Console.WriteLine($"Found {raceIds.Count} races for today");
+            return raceIds;
+        }
+
+        private void ProcessRealtimeData(string dataSpec, string key, NpgsqlConnection connection)
+        {
+            Console.WriteLine($"Processing Realtime data...");
+            Console.WriteLine($"  DataSpec: {dataSpec}");
+            Console.WriteLine($"  Key: {key}");
+
+            int result = axJVLink1.JVRTOpen(dataSpec, key);
+            if (result != 0)
+            {
+                throw new InvalidOperationException($"JVRTOpen ({dataSpec}, {key}) failed with error code: {result}");
+            }
+
+            Console.WriteLine($"JVRTOpen executed successfully");
+
+            // JVReadでデータを読み出し処理
+            Console.WriteLine($"Starting data read and processing...");
+            int totalRecords = 0;
+
+            while (true)
+            {
+#pragma warning disable IDE0018
+                int size = 110000;
+#pragma warning restore IDE0018
+
+                // JVReadでデータを読み込み
+                result = axJVLink1.JVRead(out string buff, out size, out string filename);
+
+                if (result == 0)
+                {
+                    // 全ファイル読み込み終了
+                    Console.WriteLine("All files read completed.");
+                    break;
+                }
+                else if (result == -1)
+                {
+                    // ファイル切り替わり
+                    Console.WriteLine($"  File completed: {filename.Trim()}");
+                    continue;
+                }
+                else if (result > 0)
+                {
+                    // データが読み込まれた
+                    totalRecords++;
+                    var recordData = System.Text.Encoding.GetEncoding("Shift_JIS").GetBytes(buff);
+                    ProcessRecord(recordData, connection);
+                }
+                else
+                {
+                    // エラー
+                    throw new InvalidOperationException($"JVRead failed with error code: {result}");
+                }
+            }
+
+            Console.WriteLine($"Data processing completed. Total records: {totalRecords}");
+
+            // バッファのフラッシュは呼び出し元で行うこと
+
+            axJVLink1.JVClose();
+            Console.WriteLine($"JV data processing completed.");
+
         }
 
         private void ProcessJVData(string dataSpec, string fromTime, int option)
