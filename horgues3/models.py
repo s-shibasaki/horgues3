@@ -70,7 +70,7 @@ class SoftBinnedLinear(nn.Module):
     """
     
     def __init__(self, num_bins: int = 10, d_token: int = 192, temperature: float = 1.0, 
-                 init_range: float = 3.0, dropout: float = 0.1):
+                 init_range: float = 3.0):
         super().__init__()
         self.soft_binning = SoftBinning(
             num_bins=num_bins,
@@ -78,7 +78,6 @@ class SoftBinnedLinear(nn.Module):
             init_range=init_range
         )
         self.linear = nn.Linear(num_bins, d_token)
-        self.dropout = nn.Dropout(dropout)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -92,9 +91,6 @@ class SoftBinnedLinear(nn.Module):
         
         # Linear変換
         output = self.linear(binned)  # (..., d_token)
-        
-        # ドロップアウト
-        output = self.dropout(output)
         
         return output
 
@@ -117,7 +113,6 @@ class FeatureTokenizer(nn.Module):
                 d_token=d_token,
                 temperature=binning_temperature,
                 init_range=binning_init_range,
-                dropout=dropout
             ) for name in numerical_features
         })
 
@@ -126,6 +121,9 @@ class FeatureTokenizer(nn.Module):
             name: nn.Embedding(vocab_size, d_token, padding_idx=0) 
             for name, vocab_size in categorical_features.items()
         })
+
+        self.norm = nn.LayerNorm(d_token)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x_num: Optional[Dict[str, torch.Tensor]] = None, 
                 x_cat: Optional[Dict[str, torch.Tensor]] = None):
@@ -166,52 +164,56 @@ class FeatureTokenizer(nn.Module):
 
         # トークンを結合
         result = torch.stack(tokens, dim=-2)  # (..., num_tokens, d_token)
+
+        # 正規化とドロップアウト
+        result = self.norm(result)
+        result = self.dropout(result)
+        
         return result
+    
+
+class AttentionHead(nn.Module):
+    def __init__(self, d_token: int = 192, d_head: int = 8):
+        super().__init__()
+        self.q = nn.Linear(d_token, d_head)
+        self.k = nn.Linear(d_token, d_head)
+        self.v = nn.Linear(d_token, d_head)
+
+    def forward(self, x, mask=None):
+        query = self.q(x)
+        key = self.k(x)
+        value = self.v(x)
+
+        dim_k = query.size(-1)
+        scores = torch.bmm(query, key.transpose(1, 2)) / np.sqrt(dim_k)
+
+        # マスクを適用
+        if mask is not None:
+            mask = mask.unsqueeze(1)  # (batch_size, seq_len) -> (batch_size, seq_len, seq_len) にブロードキャスト
+            scores = scores.masked_fill(~mask.bool(), -1e9)
+
+        weights = F.softmax(scores, dim=-1)
+        return torch.bmm(weights, value)
     
 class MultiHeadAttention(nn.Module):
     """マルチヘッドアテンション"""
 
-    def __init__(self, d_token: int, n_heads: int = 8, dropout: float = 0.1):
+    def __init__(self, d_token: int = 192, n_heads: int = 8, dropout: float = 0.1):
         super().__init__()
         assert d_token % n_heads == 0
 
         self.d_token = d_token
         self.n_heads = n_heads
         self.d_head = d_token // n_heads
+        self.heads = nn.ModuleList(
+            [AttentionHead(d_token, self.d_head) for _ in range(n_heads)]
+        )
+        self.output_linear = nn.Linear(d_token, d_token)
 
-        self.q_linear = nn.Linear(d_token, d_token)
-        self.k_linear = nn.Linear(d_token, d_token)
-        self.v_linear = nn.Linear(d_token, d_token)
-        self.out_linear = nn.Linear(d_token, d_token)
-
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
-        batch_size, seq_len, _ = x.shape
-
-        # Q, K, Vの計算
-        Q = self.q_linear(x).view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-        K = self.k_linear(x).view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-        V = self.v_linear(x).view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-
-        # アテンションスコアを計算
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.d_head)
-
-        if mask is not None:
-            # mask: (batch_size, seq_len)
-            attention_mask = mask.unsqueeze(1).unsqueeze(2)  # (batch_size, 1, 1, seq_len)
-            expanded_mask = attention_mask.expand(batch_size, self.n_heads, seq_len, seq_len)  # (batch_size, n_heads, seq_len, seq_len)
-            scores = scores.masked_fill(expanded_mask == 0, -1e9)
-        
-        attention_weights = F.softmax(scores, dim=-1)
-        attention_weights = self.dropout(attention_weights)
-
-        # アテンションを適用
-        context = torch.matmul(attention_weights, V)
-        context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_token)
-
-        return self.out_linear(context)  # (batch_size, seq_len, d_token)
-    
+    def forward(self, x, mask=None):
+        x = torch.cat([h(x, mask) for h in self.heads], dim=-1)
+        x = self.output_linear(x)
+        return x
 
 class FeedForward(nn.Module):
     """フィードフォワードネットワーク"""
@@ -220,11 +222,15 @@ class FeedForward(nn.Module):
         super().__init__()
         self.linear1 = nn.Linear(d_token, d_ffn)
         self.linear2 = nn.Linear(d_ffn, d_token)
+        self.gelu = nn.GELU()
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor):
-        return self.linear2(self.dropout(F.relu(self.linear1(x))))  # (batch_size, seq_len, d_token)
-    
+        x = self.linear1(x)
+        x = self.gelu(x)
+        x = self.linear2(x)
+        x = self.dropout(x)
+        return x  # (batch_size, seq_len, d_token)
 
 class TransformerBlock(nn.Module):
     """Transformerブロック"""
@@ -234,83 +240,16 @@ class TransformerBlock(nn.Module):
         if d_ffn is None:
             d_ffn = d_token * 4
 
+        self.norm1 = nn.LayerNorm(d_token)
+        self.norm2 = nn.LayerNorm(d_token)
         self.attention = MultiHeadAttention(d_token, n_heads, dropout)
         self.feed_forward = FeedForward(d_token, d_ffn, dropout)
 
-        self.norm1 = nn.LayerNorm(d_token)
-        self.norm2 = nn.LayerNorm(d_token)
-        self.dropout = nn.Dropout(dropout)
-
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
-        # アテンション + 残差接続
-        attention_output = self.attention(x, mask)
-        x = self.norm1(x + self.dropout(attention_output))
-
-        # フィードフォワード + 残差接続
-        ffn_output = self.feed_forward(x)
-        x = self.norm2(x + self.dropout(ffn_output))
-
-        return x  # (batch_size, seq_len, d_token)
-
-
-class FTTransformer(nn.Module):
-    """FT Transformer - 複数の特徴量を統合してCLSトークンを出力"""
-
-    def __init__(self, d_token: int = 192, n_layers: int = 3, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
-        super().__init__()
-        self.d_token = d_token
-
-        # [CLS]トークン
-        self.cls_token = nn.Parameter(torch.randn(1, 1, d_token))
-
-        self.transformer_blocks = nn.ModuleList([
-            TransformerBlock(d_token, n_heads, d_ffn, dropout) for _ in range(n_layers)
-        ])
-
-        self.norm = nn.LayerNorm(d_token)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, feature_tokens: torch.Tensor, mask: Optional[torch.Tensor] = None):
-        """
-        Args:
-            feature_tokens: (..., num_features, d_token) - 特徴量トークン
-            mask: (..., num_features) - 特徴量マスク (1=有効, 0=無効/パディング)
-        Returns:
-            cls_output: (..., d_token) - CLSトークンの出力
-        """
-        # 入力の形状を取得
-        *batch_dims, num_features, d_token = feature_tokens.shape
-        batch_size = int(np.prod(batch_dims))
-        
-        # バッチ次元をまとめる
-        feature_tokens_flat = feature_tokens.view(batch_size, num_features, d_token)
-        
-        # [CLS]トークンを先頭に追加
-        cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # (batch_size, 1, d_token)
-        tokens = torch.cat([cls_tokens, feature_tokens_flat], dim=1)  # (batch_size, num_features + 1, d_token)
-
-        # マスクも[CLS]トークン分を拡張
-        if mask is not None:
-            mask_flat = mask.view(batch_size, num_features)
-            cls_mask = torch.ones(batch_size, 1, device=mask.device, dtype=mask.dtype)
-            mask_with_cls = torch.cat([cls_mask, mask_flat], dim=1)  # (batch_size, num_features + 1)
-        else:
-            mask_with_cls = None
-
-        # Transformerブロックを通す
-        x = tokens
-        for block in self.transformer_blocks:
-            x = block(x, mask_with_cls)
-
-        # [CLS]トークン（最初のトークン）を抽出
-        cls_token = x[:, 0]
-        cls_token = self.norm(cls_token)
-        cls_token = self.dropout(cls_token)
-
-        # 元の形状に戻す
-        cls_output = cls_token.view(*batch_dims, d_token)
-
-        return cls_output
+        hidden_state = self.norm1(x)
+        x = x + self.attention(hidden_state, mask)
+        x = x + self.feed_forward(self.norm2(x))
+        return x
 
 
 class SequenceTransformer(nn.Module):
@@ -387,17 +326,11 @@ class RaceTransformer(nn.Module):
         self.norm = nn.LayerNorm(d_token)
         self.dropout = nn.Dropout(dropout)
 
-        # スコア計算ヘッドを改良（より安定した出力のため）
+        # スコア計算ヘッド
         self.score_head = nn.Sequential(
             nn.Linear(d_token, d_token // 2),
-            nn.LayerNorm(d_token // 2),  # LayerNormを追加
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_token // 2, d_token // 4),
-            nn.LayerNorm(d_token // 4),  # LayerNormを追加
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_token // 4, 1)
+            nn.GELU(),
+            nn.Linear(d_token // 2, 1)
         )
 
         # 出力層にマークを付ける
@@ -442,14 +375,9 @@ class HorguesModel(nn.Module):
                  categorical_features: Dict[str, int],
                  sequence_configs: Dict[str, Dict] = None,
                  d_token: int = 96,
-                 # SoftBinning関連のパラメータを追加
                  num_bins: int = 10,
                  binning_temperature: float = 1.0,
                  binning_init_range: float = 3.0,
-                 # 既存のパラメータ
-                 ft_n_layers: int = 2,
-                 ft_n_heads: int = 4,
-                 ft_d_ffn: int = None,
                  seq_n_layers: int = 2,
                  seq_n_heads: int = 4,
                  seq_d_ffn: int = None,
@@ -476,17 +404,6 @@ class HorguesModel(nn.Module):
             dropout=dropout
         )
 
-        # 時系列用のFTTransformer (特徴量統合用)
-        self.sequence_ft_transformers = nn.ModuleDict()
-        for seq_name, seq_config in self.sequence_configs.items():
-            self.sequence_ft_transformers[seq_name] = FTTransformer(
-                d_token=d_token,
-                n_layers=seq_config.get('ft_n_layers', ft_n_layers),
-                n_heads=seq_config.get('ft_n_heads', ft_n_heads),
-                d_ffn=seq_config.get('ft_d_ffn', ft_d_ffn),
-                dropout=dropout
-            )
-
         # 時系列用のSequenceTransformer (時系列処理用)
         self.sequence_transformers = nn.ModuleDict()
         for seq_name, seq_config in self.sequence_configs.items():
@@ -497,23 +414,6 @@ class HorguesModel(nn.Module):
                 d_ffn=seq_config.get('seq_d_ffn', seq_d_ffn),
                 dropout=dropout
             )
-
-        self.general_ft_transformer = FTTransformer(
-            d_token=d_token,
-            n_layers=ft_n_layers,
-            n_heads=ft_n_heads,
-            d_ffn=ft_d_ffn,
-            dropout=dropout
-        )
-
-        # 最終統合用のFTTransformer
-        self.final_ft_transformer = FTTransformer(
-            d_token=d_token,
-            n_layers=ft_n_layers,
-            n_heads=ft_n_heads,
-            d_ffn=ft_d_ffn,
-            dropout=dropout
-        )
 
         # Race Transformer (レース内相互作用用)
         self.race_transformer = RaceTransformer(
@@ -608,12 +508,8 @@ class HorguesModel(nn.Module):
                 
                 # 各時系列ステップの特徴量を統合
                 if seq_tokens.size(-2) > 0:  # 特徴量が存在する場合
-                    batch_size_seq, seq_len, num_features, d_token = seq_tokens.shape
-                    seq_tokens_reshaped = seq_tokens.view(batch_size_seq * seq_len, num_features, d_token)
-                    
-                    # FTTransformerで各時系列ステップの特徴量を統合
-                    step_features = self.sequence_ft_transformers[seq_name](seq_tokens_reshaped)  # (batch_size * seq_len, d_token)
-                    step_features = step_features.view(batch_size_seq, seq_len, d_token)  # (batch_size, seq_len, d_token)
+                    # 全てのトークンを合計して1つの特徴量にする
+                    step_features = seq_tokens.sum(dim=-2)  # (batch_size, seq_len, d_token)
                     
                     # SequenceTransformerで時系列を処理
                     seq_feature = self.sequence_transformers[seq_name](step_features, seq_mask)  # (batch_size, d_token)
@@ -634,14 +530,15 @@ class HorguesModel(nn.Module):
             
             # 一般データの特徴量を統合
             if general_tokens.size(-2) > 0:  # 特徴量が存在する場合
-                general_feature = self.general_ft_transformer(general_tokens)  # (batch_size, d_token)
+                # 全てのトークンを合計して1つの特徴量にする
+                general_feature = general_tokens.sum(dim=-2)  # (batch_size, d_token)
                 sequence_features.append(general_feature)
 
             # 3. 最終統合
             if sequence_features:
                 # 全ての特徴量を統合
                 all_features = torch.stack(sequence_features, dim=1)  # (batch_size, num_feature_types, d_token)
-                horse_feature = self.final_ft_transformer(all_features)  # (batch_size, d_token)
+                horse_feature = all_features.sum(dim=-2)  # (batch_size, d_token)
             else:
                 # 特徴量がない場合はゼロベクトル
                 horse_feature = torch.zeros(batch_size, self.d_token, device=next(self.parameters()).device)
