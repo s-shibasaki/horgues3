@@ -94,3 +94,44 @@ Thumbs.db
 *.tmp
 *.temp
 *.log
+
+# Model files and training artifacts
+*.pth
+*.pt
+*.ckpt
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.model
+*.weights
+models/
+checkpoints/
+experiments/
+outputs/
+runs/
+logs/
+tensorboard/
+wandb/
+
+# Data files
+*.csv
+*.parquet
+*.feather
+*.json
+*.jsonl
+data/
+datasets/
+raw_data/
+processed_data/
+
+# Results and reports
+results/
+reports/
+plots/
+figures/
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.svg
