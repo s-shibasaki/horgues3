@@ -35,6 +35,7 @@ class HorguesDataset(Dataset):
         self.max_horses = max_horses
         self.max_hist_len = max_hist_len
         self.max_prev_days = max_prev_days
+        self.hours_before_race = hours_before_race
 
     def fetch(self):
         """ データベースからデータを取得する"""
@@ -51,62 +52,45 @@ class HorguesDataset(Dataset):
 
         query = f"""
         SELECT 
-            hri.kaisai_year || hri.kaisai_month_day || hri.track_code || hri.kaisai_kai || hri.kaisai_day || hri.race_number as race_id,
-            hri.horse_number,
+            hri.kaisai_year || hri.kaisai_month_day || hri.track_code || hri.kaisai_kai || hri.kaisai_day || hri.race_number as race_id_raw,
+            hri.horse_number as horse_number_raw,
 
             -- メタデータ
-            hri.kaisai_year || hri.kaisai_month_day as kaisai_ymd,
-            rd.start_time,
+            hri.kaisai_year || hri.kaisai_month_day as kaisai_ymd_raw,
+            rd.start_time as start_hm_raw,
 
             -- 数値特徴量
-            hri.horse_weight,
-            hri.weight_change_sign,
-            hri.weight_change,
-            rd.distance,
+            hri.horse_weight as horse_weight_raw,
+            hri.weight_change_sign || hri.weight_change as weight_change_raw,
+            rd.distance as distance_raw,
 
             -- カテゴリ特徴量
-            hri.blood_registration_number,
-            hri.jockey_code,
-            rd.weather_code,
-            CASE 
-                WHEN 
-                    rd.track_code_detail BETWEEN '10' AND '22' OR
-                    rd.track_code_detail = '51' OR
-                    rd.track_code BETWEEN '53' AND '59'
-                THEN
-                    rd.turf_condition_code 
-                WHEN
-                    rd.track_code_detail BETWEEN '23' AND '29' OR
-                    rd.track_code_detail = '52'
-                THEN
-                    rd.dirt_condition_code
-                ELSE
-                    '0'
-            END track_condition_code,
+            hri.blood_registration_number as horse_id_raw,
+            hri.jockey_code as jockey_id_raw,
+            rd.track_code_detail as track_detail_raw,
+            rd.weather_code as weather_raw,
+            rd.turf_condition_code as turf_cond_raw,
+            rd.dirt_condition_code as dirt_cond_raw,
 
             -- ターゲット
-            hri.final_order
-        FROM public.horse_race_info hri
-        INNER JOIN public.race_detail rd ON (
+            hri.final_order as ranking_raw
+
+        FROM
+            public.horse_race_info hri
+        INNER JOIN 
+            public.race_detail rd ON
             hri.kaisai_year = rd.kaisai_year AND
             hri.kaisai_month_day = rd.kaisai_month_day AND
             hri.track_code = rd.track_code AND
             hri.kaisai_kai = rd.kaisai_kai AND
             hri.kaisai_day = rd.kaisai_day AND
             hri.race_number = rd.race_number
-        )
-        WHERE 1=1 
-            AND hri.horse_number BETWEEN '01' AND '{self.max_horses:02}'
-            AND hri.final_order BETWEEN '01' AND '{self.max_horses:02}'
-            AND (
-                hri.kaisai_year > '{start_year}'
-                OR (hri.kaisai_year = '{start_year}' AND hri.kaisai_month_day >= '{start_month_day}')
-            )
-            AND (
-                hri.kaisai_year < '{end_year}'
-                OR (hri.kaisai_year = '{end_year}' AND hri.kaisai_month_day <= '{end_month_day}')
-            )
-        ORDER BY race_id, hri.horse_number;
+        WHERE 
+            hri.horse_number BETWEEN '01' AND '{self.max_horses:02}' AND
+            hri.final_order BETWEEN '01' AND '{self.max_horses:02}' AND
+            (hri.kaisai_year > '{start_year}' OR (hri.kaisai_year = '{start_year}' AND hri.kaisai_month_day >= '{start_month_day}')) AND
+            (hri.kaisai_year < '{end_year}' OR (hri.kaisai_year = '{end_year}' AND hri.kaisai_month_day <= '{end_month_day}'))
+        ORDER BY hri.kaisai_year, hri.kaisai_month_day, hri.track_code, hri.kaisai_kai, hri.kaisai_day, hri.horse_number;
         """
 
         self.fetched_data = pd.read_sql_query(query, engine)
@@ -123,62 +107,89 @@ class HorguesDataset(Dataset):
         # メタデータ
         # ==========================================
 
-        # kaisai_ymd: 開催年月日をdatetime型に変換
-        data['kaisai_ymd_parsed'] = pd.to_datetime(data['kaisai_ymd'], format='%Y%m%d', errors='coerce').dt.date
-        kaisai_ymd_mask = data['kaisai_ymd'] != '00000000'
-        data.loc[~kaisai_ymd_mask, 'kaisai_ymd_parsed'] = pd.NaT
-        
-        # start_time: 発走時刻をtime型に変換 (HHMM形式を想定)
-        data['start_time_parsed'] = pd.to_datetime(data['start_time'], format='%H%M', errors='coerce').dt.time
-        start_time_mask = data['start_time'] != '0000'
-        data.loc[~start_time_mask, 'start_time_parsed'] = pd.NaT
+        # race_id: race_id_rawをそのまま使用
+        data['race_id'] = data['race_id_raw']
+
+        # horse_number_int: horse_number_rawをint64に変換
+        data['horse_number_int'] = data['horse_number_raw'].astype(np.int64)
+        horse_number_mask = data['horse_number_int'].between(1, self.max_horses)  # 1からmax_horsesの範囲
+        data.loc[~horse_number_mask, 'horse_number_int'] = 0  # 無効な値は0に設定
+
+        # kaisai_ymd_date: kaisai_ymd_rawをdate型に変換
+        data['kaisai_ymd_date'] = pd.to_datetime(data['kaisai_ymd_raw'], format='%Y%m%d', errors='coerce').dt.date
+        kaisai_ymd_mask = data['kaisai_ymd_raw'] != '00000000'
+        data.loc[~kaisai_ymd_mask, 'kaisai_ymd_date'] = pd.NaT
+
+        # start_hm_time: start_hm_rawをtime型に変換 (HHMM形式を想定)
+        data['start_hm_time'] = pd.to_datetime(data['start_hm_raw'], format='%H%M', errors='coerce').dt.time
+        start_hm_mask = data['start_hm_raw'] != '0000'
+        data.loc[~start_hm_mask, 'start_hm_time'] = pd.NaT
+
+        # kaisai_start_datetime: kaisai_ymd_dateとstart_hm_timeを結合してdatetime型に変換
+        data['kaisai_start_datetime'] = pd.to_datetime(data['kaisai_ymd_date'], errors='coerce')
+        start_hm_mask = data['start_hm_time'].notna()
+        data.loc[start_hm_mask, 'kaisai_start_datetime'] += pd.to_timedelta(data.loc[start_hm_mask, 'start_hm_time'].astype(str))
+
 
         # ==========================================
         # 数値特徴量
         # ==========================================
 
-        # horse_weight: 馬体重
-        data['horse_weight_numeric'] = pd.to_numeric(data['horse_weight'], errors='coerce').astype(np.float32)
+        # horse_weight_numeric: 馬体重
+        data['horse_weight_numeric'] = pd.to_numeric(data['horse_weight_raw'], errors='coerce').astype(np.float32)
         horse_weight_mask = data['horse_weight_numeric'].between(2, 998)  # 馬体重は2kgから998kgの範囲
         data.loc[~horse_weight_mask, 'horse_weight_numeric'] = np.nan
 
-        # weight_change: 増減差
-        data['weight_change_numeric'] = pd.to_numeric(data['weight_change_sign'] + data['weight_change'], errors='coerce').astype(np.float32)
+        # weight_change_numeric: 増減差
+        data['weight_change_numeric'] = pd.to_numeric(data['weight_change_raw'], errors='coerce').astype(np.float32)
         weight_change_mask = data['weight_change_numeric'].between(-998, 998)  # 増減差は-998から998の範囲
         data.loc[~weight_change_mask, 'weight_change_numeric'] = np.nan
 
-        # distance: 距離
-        data['distance_numeric'] = pd.to_numeric(data['distance'], errors='coerce').astype(np.float32)
+        # distance_numeric: 距離
+        data['distance_numeric'] = pd.to_numeric(data['distance_raw'], errors='coerce').astype(np.float32)
         data.loc[data['distance_numeric'] == 0, 'distance_numeric'] = np.nan  # 距離が0のレコードは無効とする
 
         # ==========================================
         # カテゴリ特徴量
         # ==========================================
 
-        # blood_registration_number: 血統登録番号
-        data['blood_registration_number_valid'] = data['blood_registration_number'].fillna("<NULL>").astype(str)
-        data.loc[data['blood_registration_number_valid'] == "0000000000", 'blood_registration_number_valid'] = "<NULL>"  # 0000000000は無効とする
+        # horse_id_valid: 血統登録番号
+        data['horse_id_valid'] = data['horse_id_raw'].fillna("<NULL>")
+        data.loc[data['horse_id_valid'] == "0000000000", 'horse_id_valid'] = "<NULL>"  # 0000000000は無効とする
 
-        # jockey_code: 騎手コード
-        data['jockey_code_valid'] = data['jockey_code'].fillna("<NULL>").astype(str)
-        data.loc[data['jockey_code_valid'] == "00000", 'jockey_code_valid'] = "<NULL>"  # 00000は無効とする
+        # jockey_id_valid: 騎手コード
+        data['jockey_id_valid'] = data['jockey_id_raw'].fillna("<NULL>")
+        data.loc[data['jockey_id_valid'] == "00000", 'jockey_id_valid'] = "<NULL>"  # 00000は無効とする
 
-        # weather_code: 天候コード
-        data['weather_code_valid'] = data['weather_code'].fillna("<NULL>").astype(str)
-        data.loc[data['weather_code_valid'] == "0", 'weather_code_valid'] = "<NULL>"  # 0は無効とする
+        # track_detail_valid: トラックコード詳細
+        data['track_detail_valid'] = data['track_detail_raw'].fillna("<NULL>")
+        data.loc[data['track_detail_valid'] == "00", 'track_detail_valid'] = "<NULL>"  # 00は無効とする
 
-        # track_condition_code: 馬場状態コード
-        data['track_condition_code_valid'] = data['track_condition_code'].fillna("<NULL>").astype(str)
-        data.loc[data['track_condition_code_valid'] == "0", 'track_condition_code_valid'] = "<NULL>"  # 0は無効とする
+        # track_type_valid: 芝 or ダート
+        turf_mask = data['track_detail_valid'].between('10', '22') | data['track_detail_valid'].equals('51') | data['track_detail_valid'].between('53', '59')
+        dirt_mask = data['track_detail_valid'].between('23', '29') | data['track_detail_valid'].equals('52')
+        data['track_type_valid'] = "<NULL>"
+        data.loc[turf_mask, 'track_type_valid'] = 'turf'
+        data.loc[dirt_mask, 'track_type_valid'] = 'dirt'
+
+        # weather_valid: 天候コード
+        data['weather_valid'] = data['weather_raw'].fillna("<NULL>")
+        data.loc[data['weather_valid'] == "0", 'weather_valid'] = "<NULL>"  # 0は無効とする
+
+        # track_cond_valid: 馬場状態
+        data['track_cond_valid'] = "<NULL>"
+        data.loc[data['track_type_valid'] == 'turf', 'track_cond_valid'] = data['turf_cond_raw']
+        data.loc[data['track_type_valid'] == 'dirt', 'track_cond_valid'] = data['dirt_cond_raw']
+        data.loc[data['track_cond_valid'] == '0', 'track_cond_valid'] = "<NULL>"  # 0は無効とする
 
         # ==========================================
         # ターゲット
         # ==========================================
 
-        # final_order: 最終着順
-        data['final_order_numeric'] = pd.to_numeric(data['final_order'], errors='coerce').astype(np.int64) - 1  # 0-indexedに変換
-        final_order_mask = data['final_order_numeric'].between(0, self.max_horses - 1)  # 0からnum_horses-1の範囲
-        data.loc[~final_order_mask, 'final_order_numeric'] = -1  # 無効な値は-1に設定
+        # ranking_int: 最終着順
+        data['ranking_int'] = data['ranking_raw'].astype(np.int64)
+        ranking_mask = data['ranking_int'].between(1, self.max_horses)  # 1からnum_horsesの範囲
+        data.loc[~ranking_mask, 'ranking_int'] = 0  # 無効な値は0に設定
 
         self.prepared_data = data
         logger.info(f"Prepared data with {len(self.prepared_data)} records.")
@@ -190,7 +201,7 @@ class HorguesDataset(Dataset):
         logger.info("Building data structure...")
 
         data = self.prepared_data
-        target_data = data[data['kaisai_ymd_parsed'].between(self.start_date, self.end_date)]
+        target_data = data[data['kaisai_ymd_date'].between(self.start_date, self.end_date)]
 
         # レースIDでグループ化
         race_groups = target_data.groupby('race_id')
@@ -209,35 +220,37 @@ class HorguesDataset(Dataset):
                 "distance": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
             },
             "x_cat": {
-                "blood_registration_number": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
-                "jockey_code": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
-                "weather_code": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
-                "track_condition_code": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "horse_id": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "jockey_id": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                'track_detail': np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                'track_type': np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "weather": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "track_cond": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
             },
             "sequence_data": {
                 "horse_weight_history": {
                     "x_num": {
+                        'days_before': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                         "horse_weight": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                         "weight_change": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
-                        'days_before': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                     },
                     "x_cat": {},
                     "mask": np.zeros((num_races, self.max_horses, self.max_hist_len), dtype=bool),
                 }
             },
             "mask": np.zeros((num_races, self.max_horses), dtype=bool),
-            "rankings": np.full((num_races, self.max_horses), -1, dtype=np.int64),
+            "rankings": np.full((num_races, self.max_horses), 0, dtype=np.int64),  # 0は無効値
             'race_id': np.array(race_ids, dtype=object),
         }
 
         # シーケンスデータ構築に使用するグループ（ソート済みに変更）
         horse_groups = {}
-        for name, group in data.groupby('blood_registration_number_valid'):
-            # 各馬のデータを事前にソート（kaisai_ymd_parsed, start_time_parsed の降順）
-            horse_groups[name] = group.sort_values(['kaisai_ymd_parsed', 'start_time_parsed'], ascending=False)
+        for name, group in data.groupby('horse_id_valid'):
+            # 各馬のデータを事前にソート (降順)
+            horse_groups[name] = group.sort_values('kaisai_start_datetime', ascending=False)
 
         # 進捗報告の間隔を設定
-        progress_interval = min(1000, max(1, num_races // 10))  # 10%ごとに進捗報告
+        progress_interval = min(1000, max(1, -(-num_races // 10)))  # 10%ごとに進捗報告
 
         # 各レースのデータを構築
         for race_idx, race_id in enumerate(race_ids):
@@ -249,51 +262,49 @@ class HorguesDataset(Dataset):
 
             race_data = race_groups.get_group(race_id)
             
-            # シーケンスデータ構築のため開催日と発走時刻を取得（最初の行から一度だけ取得）
-            first_row = race_data.iloc[0]
-            current_date = first_row['kaisai_ymd_parsed']
-            current_time = first_row['start_time_parsed']
+            # シーケンスデータ構築のためタイムスタンプを取得（最初の行から一度だけ取得）
+            current_datetime = race_data.iloc[0]['kaisai_start_datetime']
+            cutoff_datetime = current_datetime - timedelta(hours=self.hours_before_race)
 
             for _, row in race_data.iterrows():
-                horse_num = int(row['horse_number']) - 1  # 0-indexedに変換
+                horse_idx = row['horse_number_int'] - 1  # 0-indexedに変換
 
                 # マスク
-                self.built_data['mask'][race_idx, horse_num] = True
+                self.built_data['mask'][race_idx, horse_idx] = True
 
                 # 数値特徴量
-                self.built_data['x_num']['horse_weight'][race_idx, horse_num] = row['horse_weight_numeric']
-                self.built_data['x_num']['weight_change'][race_idx, horse_num] = row['weight_change_numeric']
-                self.built_data['x_num']['distance'][race_idx, horse_num] = row['distance_numeric']
+                self.built_data['x_num']['horse_weight'][race_idx, horse_idx] = row['horse_weight_numeric']
+                self.built_data['x_num']['weight_change'][race_idx, horse_idx] = row['weight_change_numeric']
+                self.built_data['x_num']['distance'][race_idx, horse_idx] = row['distance_numeric']
 
                 # カテゴリ特徴量
-                self.built_data['x_cat']['blood_registration_number'][race_idx, horse_num] = row['blood_registration_number_valid']
-                self.built_data['x_cat']['jockey_code'][race_idx, horse_num] = row['jockey_code_valid']
-                self.built_data['x_cat']['weather_code'][race_idx, horse_num] = row['weather_code_valid']
-                self.built_data['x_cat']['track_condition_code'][race_idx, horse_num] = row['track_condition_code_valid']
+                self.built_data['x_cat']['horse_id'][race_idx, horse_idx] = row['horse_id_valid']
+                self.built_data['x_cat']['jockey_id'][race_idx, horse_idx] = row['jockey_id_valid']
+                self.built_data['x_cat']['track_detail'][race_idx, horse_idx] = row['track_detail_valid']
+                self.built_data['x_cat']['track_type'][race_idx, horse_idx] = row['track_type_valid']
+                self.built_data['x_cat']['weather'][race_idx, horse_idx] = row['weather_valid']
+                self.built_data['x_cat']['track_cond'][race_idx, horse_idx] = row['track_cond_valid']
 
                 # ターゲット
-                self.built_data['rankings'][race_idx, horse_num] = row['final_order_numeric']
+                self.built_data['rankings'][race_idx, horse_idx] = row['ranking_int']  # ranking_intを使用
 
                 # シーケンスデータ構築時に使用するキー
-                horse_id = row['blood_registration_number_valid']  
+                horse_key = row['horse_id_valid']  
 
                 # 馬体重履歴データの構築
-                if horse_id != "<NULL>" and horse_id in horse_groups:
-                    history = horse_groups[horse_id]
+                if horse_key != "<NULL>" and horse_key in horse_groups:
+                    history = horse_groups[horse_key]
 
                     # 過去のデータのみフィルタ（既にソート済みなので効率的）
-                    valid_history = history[
-                        (history['kaisai_ymd_parsed'] < current_date) | 
-                        ((history['kaisai_ymd_parsed'] == current_date) & (history['start_time_parsed'] < current_time))
-                    ].head(self.max_hist_len)  # 既にソート済みなのでheadで十分
+                    valid_history = history[history['kaisai_start_datetime'] < cutoff_datetime].head(self.max_hist_len)  # 既にソート済みなのでheadで十分
                     
                     valid_length = len(valid_history)
                     if valid_length > 0:
-                        days_before = np.array([(current_date - date).days for date in valid_history['kaisai_ymd_parsed']], dtype=np.float32)
-                        self.built_data['sequence_data']['horse_weight_history']['x_num']['horse_weight'][race_idx, horse_num, :valid_length] = valid_history['horse_weight_numeric'].values
-                        self.built_data['sequence_data']['horse_weight_history']['x_num']['weight_change'][race_idx, horse_num, :valid_length] = valid_history['weight_change_numeric'].values
-                        self.built_data['sequence_data']['horse_weight_history']['x_num']['days_before'][race_idx, horse_num, :valid_length] = days_before
-                        self.built_data['sequence_data']['horse_weight_history']['mask'][race_idx, horse_num, :valid_length] = True
+                        days_before = np.array([(current_datetime - hist_datetime).total_seconds() / (24 * 3600) for hist_datetime in valid_history['kaisai_start_datetime']], dtype=np.float32)
+                        self.built_data['sequence_data']['horse_weight_history']['x_num']['days_before'][race_idx, horse_idx, :valid_length] = days_before
+                        self.built_data['sequence_data']['horse_weight_history']['x_num']['horse_weight'][race_idx, horse_idx, :valid_length] = valid_history['horse_weight_numeric'].values
+                        self.built_data['sequence_data']['horse_weight_history']['x_num']['weight_change'][race_idx, horse_idx, :valid_length] = valid_history['weight_change_numeric'].values
+                        self.built_data['sequence_data']['horse_weight_history']['mask'][race_idx, horse_idx, :valid_length] = True
 
         logger.info("Data structure construction completed successfully.")
         return self

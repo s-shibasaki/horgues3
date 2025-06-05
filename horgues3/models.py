@@ -577,7 +577,7 @@ class PlackettLuceLoss(nn.Module):
         """
         Args:
             scores: 予測スコア (batch_size, num_horses)
-            rankings: 真の着順 (batch_size, num_horses) - 0-indexed、-1は無効
+            rankings: 真の着順 (batch_size, num_horses) - 1-indexed、0は無効
             mask: 有効な馬のマスク (batch_size, num_horses)
             
         Returns:
@@ -606,8 +606,8 @@ class PlackettLuceLoss(nn.Module):
             valid_scores = batch_scores[valid_horses]
             valid_rankings = batch_rankings[valid_horses]
             
-            # 無効な着順(-1)を除外
-            valid_rank_mask = valid_rankings >= 0
+            # 無効な着順(0)を除外
+            valid_rank_mask = valid_rankings > 0
             if not valid_rank_mask.any():
                 continue
                 
@@ -618,7 +618,7 @@ class PlackettLuceLoss(nn.Module):
             if len(final_horses) <= 1:
                 continue
             
-            # 着順でソート
+            # 着順でソート（1-indexedなのでそのまま使用）
             sorted_indices = torch.argsort(final_rankings)
             sorted_scores = final_scores[sorted_indices]
             
@@ -692,7 +692,7 @@ class WeightedPlackettLuceLoss(nn.Module):
             valid_scores = batch_scores[valid_horses]
             valid_rankings = batch_rankings[valid_horses]
             
-            valid_rank_mask = valid_rankings >= 0
+            valid_rank_mask = valid_rankings > 0
             if not valid_rank_mask.any():
                 continue
                 
@@ -770,7 +770,7 @@ class ListwiseLoss(nn.Module):
             valid_scores = batch_scores[valid_horses]
             valid_rankings = batch_rankings[valid_horses]
             
-            valid_rank_mask = valid_rankings >= 0
+            valid_rank_mask = valid_rankings > 0
             if not valid_rank_mask.any():
                 continue
                 
@@ -846,7 +846,7 @@ class PairwiseRankingLoss(nn.Module):
             valid_scores = batch_scores[valid_horses]
             valid_rankings = batch_rankings[valid_horses]
             
-            valid_rank_mask = valid_rankings >= 0
+            valid_rank_mask = valid_rankings > 0
             if not valid_rank_mask.any():
                 continue
                 
@@ -954,7 +954,7 @@ class RankNetLoss(nn.Module):
             valid_scores = batch_scores[valid_horses]
             valid_rankings = batch_rankings[valid_horses]
             
-            valid_rank_mask = valid_rankings >= 0
+            valid_rank_mask = valid_rankings > 0
             if not valid_rank_mask.any():
                 continue
                 

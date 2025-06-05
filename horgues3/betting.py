@@ -288,8 +288,7 @@ def format_betting_results(race_ids, probabilities, masks=None):
             sorted_indices = np.argsort(probs)[::-1]
             
             # 出力枚数を決定
-            num_output = 3 if bet_type in ['tansho', 'fukusho'] else 10
-            num_output = min(num_output, len(sorted_indices))
+            num_output = min(10, len(sorted_indices))
             
             # 上位の馬券を表示
             bet_results = []
