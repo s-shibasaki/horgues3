@@ -39,25 +39,49 @@ horgues3/
 
 ### 必要な環境
 - Python 3.11+
-- PostgreSQL
+- PostgreSQL 12+
 - JRA-VAN Data Lab. SDK（データ収集に必要）
 
 ### インストール
 
-1. リポジトリのクローン
+1. **リポジトリのクローン**
 ```bash
 git clone <repository-url>
 cd horgues3
 ```
 
-2. Python環境のセットアップ
+2. **PostgreSQLの設定**
+
+   a) PostgreSQLのインストール
+   - Windows: [PostgreSQL公式サイト](https://www.postgresql.org/download/windows/)からダウンロードしてインストール
+   - インストール時に以下の設定を行う：
+     - スーパーユーザー（postgres）のパスワード: `postgres`
+     - ポート番号: `5432` (デフォルト)
+
+   b) データベースの作成
+   ```sql
+   -- PostgreSQL管理ツール（pgAdmin）またはpsqlコマンドで実行
+   CREATE DATABASE horgues3;
+   ```
+
+   c) 接続テスト
+   ```bash
+   # psqlコマンドでの接続確認
+   psql -h localhost -U postgres -d horgues3
+   # パスワード入力: postgres
+   ```
+
+   d) 設定の確認
+   システムは以下の接続文字列を使用します：
+   ```
+   Host=localhost;Database=horgues3;Username=postgres;Password=postgres
+   ```
+
+   **注意**: 本番環境では、セキュリティのためにより強固なパスワードとユーザー設定を使用してください。
+
+3. **Python環境のセットアップ**
 ```bash
 pip install -e .
-```
-
-3. データベースの設定
-```bash
-# PostgreSQLの設定（詳細は別途ドキュメント参照）
 ```
 
 ### 使用方法
