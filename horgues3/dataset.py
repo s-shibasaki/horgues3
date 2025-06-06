@@ -51,6 +51,27 @@ class HorguesDataset(Dataset):
         engine = create_engine("postgresql://postgres:postgres@localhost/horgues3")
 
         query = f"""
+        WITH pedigree_pivot AS (
+            SELECT 
+                blood_registration_number,
+                MAX(CASE WHEN pedigree_index = 0 THEN breeding_registration_number END) as pedigree_0,
+                MAX(CASE WHEN pedigree_index = 1 THEN breeding_registration_number END) as pedigree_1,
+                MAX(CASE WHEN pedigree_index = 2 THEN breeding_registration_number END) as pedigree_2,
+                MAX(CASE WHEN pedigree_index = 3 THEN breeding_registration_number END) as pedigree_3,
+                MAX(CASE WHEN pedigree_index = 4 THEN breeding_registration_number END) as pedigree_4,
+                MAX(CASE WHEN pedigree_index = 5 THEN breeding_registration_number END) as pedigree_5,
+                MAX(CASE WHEN pedigree_index = 6 THEN breeding_registration_number END) as pedigree_6,
+                MAX(CASE WHEN pedigree_index = 7 THEN breeding_registration_number END) as pedigree_7,
+                MAX(CASE WHEN pedigree_index = 8 THEN breeding_registration_number END) as pedigree_8,
+                MAX(CASE WHEN pedigree_index = 9 THEN breeding_registration_number END) as pedigree_9,
+                MAX(CASE WHEN pedigree_index = 10 THEN breeding_registration_number END) as pedigree_10,
+                MAX(CASE WHEN pedigree_index = 11 THEN breeding_registration_number END) as pedigree_11,
+                MAX(CASE WHEN pedigree_index = 12 THEN breeding_registration_number END) as pedigree_12,
+                MAX(CASE WHEN pedigree_index = 13 THEN breeding_registration_number END) as pedigree_13
+            FROM public.horse_master_pedigree
+            WHERE pedigree_index BETWEEN 0 AND 13
+            GROUP BY blood_registration_number
+        )
         SELECT 
             hri.kaisai_year || hri.kaisai_month_day || hri.track_code || hri.kaisai_kai || hri.kaisai_day || hri.race_number as race_id_raw,
             hri.horse_number as horse_number_raw,
@@ -63,6 +84,12 @@ class HorguesDataset(Dataset):
             hri.horse_weight as horse_weight_raw,
             hri.weight_change_sign || hri.weight_change as weight_change_raw,
             rd.distance as distance_raw,
+            hri.race_number as race_number_raw,
+            rd.registration_count as registration_count_raw,
+            -- hri.horse_number as horse_number_raw,  # メタデータセクションで取得済み
+            hri.frame_number as frame_number_raw,
+            hri.horse_age as horse_age_raw,
+            hri.burden_weight as burden_weight_raw,
 
             -- カテゴリ特徴量
             hri.blood_registration_number as horse_id_raw,
@@ -71,6 +98,30 @@ class HorguesDataset(Dataset):
             rd.weather_code as weather_raw,
             rd.turf_condition_code as turf_cond_raw,
             rd.dirt_condition_code as dirt_cond_raw,
+            rd.grade_code as grade_raw,
+            rd.course_kubun as course_raw,
+            hri.sex_code as sex_raw,
+            hri.trainer_area_code as trainer_area_raw,
+            hri.trainer_code as trainer_id_raw,
+            hri.blinker_use_kubun as blinker_use_raw,
+            jm.sex_code as jockey_sex_raw,
+            tm.sex_code as trainer_sex_raw,
+
+            -- 血統情報
+            pp.pedigree_0 as pedigree_0_raw,
+            pp.pedigree_1 as pedigree_1_raw,
+            pp.pedigree_2 as pedigree_2_raw,
+            pp.pedigree_3 as pedigree_3_raw,
+            pp.pedigree_4 as pedigree_4_raw,
+            pp.pedigree_5 as pedigree_5_raw,
+            pp.pedigree_6 as pedigree_6_raw,
+            pp.pedigree_7 as pedigree_7_raw,
+            pp.pedigree_8 as pedigree_8_raw,
+            pp.pedigree_9 as pedigree_9_raw,
+            pp.pedigree_10 as pedigree_10_raw,
+            pp.pedigree_11 as pedigree_11_raw,
+            pp.pedigree_12 as pedigree_12_raw,
+            pp.pedigree_13 as pedigree_13_raw,
 
             -- ターゲット
             hri.final_order as ranking_raw
@@ -85,6 +136,15 @@ class HorguesDataset(Dataset):
             hri.kaisai_kai = rd.kaisai_kai AND
             hri.kaisai_day = rd.kaisai_day AND
             hri.race_number = rd.race_number
+        LEFT JOIN
+            public.jockey_master jm ON
+            hri.jockey_code = jm.jockey_code
+        LEFT JOIN
+            public.trainer_master tm ON
+            hri.trainer_code = tm.trainer_code
+        LEFT JOIN
+            pedigree_pivot pp ON
+            hri.blood_registration_number = pp.blood_registration_number
         WHERE 
             hri.horse_number BETWEEN '01' AND '{self.max_horses:02}' AND
             hri.final_order BETWEEN '01' AND '{self.max_horses:02}' AND
@@ -149,6 +209,34 @@ class HorguesDataset(Dataset):
         data['distance_numeric'] = pd.to_numeric(data['distance_raw'], errors='coerce').astype(np.float32)
         data.loc[data['distance_numeric'] == 0, 'distance_numeric'] = np.nan  # 距離が0のレコードは無効とする
 
+        # race_number_numeric: レース番号
+        data['race_number_numeric'] = pd.to_numeric(data['race_number_raw'], errors='coerce').astype(np.float32)
+        data.loc[data['race_number_numeric'] == 0, 'race_number_numeric'] = np.nan  # レース番号が0のレコードは無効
+
+        # registration_count_numeric: 登録頭数
+        data['registration_count_numeric'] = pd.to_numeric(data['registration_count_raw'], errors='coerce').astype(np.float32)
+        registration_count_mask = data['registration_count_numeric'].between(1, self.max_horses)  # 1からmax_horsesの範囲
+        data.loc[~registration_count_mask, 'registration_count_numeric'] = np.nan  # 無効な値はNaNに設定
+
+        # horse_number_numeric: 馬番号
+        data['horse_number_numeric'] = pd.to_numeric(data['horse_number_raw'], errors='coerce').astype(np.float32)
+        horse_number_numeric_mask = data['horse_number_numeric'].between(1, self.max_horses)  # 1からmax_horsesの範囲
+        data.loc[~horse_number_numeric_mask, 'horse_number_numeric'] = np.nan  # 無効な値はNaNに設定
+
+        # frame_number_numeric: 枠番
+        data['frame_number_numeric'] = pd.to_numeric(data['frame_number_raw'], errors='coerce').astype(np.float32)
+        data.loc[data['frame_number_numeric'] == 0, 'frame_number_numeric'] = np.nan  # 枠番が0のレコードは無効とする
+
+        # horse_age_numeric: 馬齢
+        data['horse_age_numeric'] = pd.to_numeric(data['horse_age_raw'], errors='coerce').astype(np.float32)
+        horse_age_mask = data['horse_age_numeric'].between(1, 30)  # 馬齢は1歳から30歳の範囲
+        data.loc[~horse_age_mask, 'horse_age_numeric'] = np.nan
+
+        # burden_weight_numeric: 負担重量 
+        data['burden_weight_numeric'] = pd.to_numeric(data['burden_weight_raw'], errors='coerce').astype(np.float32) * 0.1  # 負担重量は0.1倍
+        burden_weight_mask = data['burden_weight_numeric'].between(0.1, 99.9)  # 負担重量は0.1倍から99.9倍の範囲
+        data.loc[~burden_weight_mask, 'burden_weight_numeric'] = np.nan  # 無効な値はNaNに設定
+
         # ==========================================
         # カテゴリ特徴量
         # ==========================================
@@ -181,6 +269,44 @@ class HorguesDataset(Dataset):
         data.loc[data['track_type_valid'] == 'turf', 'track_cond_valid'] = data['turf_cond_raw']
         data.loc[data['track_type_valid'] == 'dirt', 'track_cond_valid'] = data['dirt_cond_raw']
         data.loc[data['track_cond_valid'] == '0', 'track_cond_valid'] = "<NULL>"  # 0は無効とする
+
+        # grade_valid: グレードコード
+        data['grade_valid'] = data['grade_raw'].fillna("<NULL>")
+        data.loc[data['grade_valid'] == "0", 'grade_valid'] = "<NULL>"
+
+        # course_valid: コース区分
+        data['course_valid'] = data['course_raw'].fillna("<NULL>")
+        data.loc[data['course_valid'] == "  ", 'course_valid'] = "<NULL>"
+
+        # sex_valid: 性別コード
+        data['sex_valid'] = data['sex_raw'].fillna("<NULL>")
+        data.loc[data['sex_valid'] == "0", 'sex_valid'] = "<NULL>"
+
+        # trainer_area_valid: 調教師エリアコード
+        data['trainer_area_valid'] = data['trainer_area_raw'].fillna("<NULL>")
+        data.loc[data['trainer_area_valid'] == "0", 'trainer_area_valid'] = "<NULL>"  # 0は無効とする
+
+        # trainer_id_valid: 調教師コード
+        data['trainer_id_valid'] = data['trainer_id_raw'].fillna("<NULL>")
+        data.loc[data['trainer_id_valid'] == "00000", 'trainer_id_valid'] = "<NULL>"  # 00000は無効とする
+
+        # blinker_use_valid: ブリンカー使用区分
+        data['blinker_use_valid'] = data['blinker_use_raw'].fillna("<NULL>")  # 0は未使用を意味する有効値
+
+        # jockey_sex_valid: 騎手性別区分
+        data['jockey_sex_valid'] = data['jockey_sex_raw'].fillna('<NULL>')
+        data.loc[data['jockey_sex_valid'] == "0", 'jockey_sex_valid'] = "<NULL>"
+
+        # trainer_sex_valid: 調教師性別区分
+        data['trainer_sex_valid'] = data['trainer_sex_raw'].fillna('<NULL>')
+        data.loc[data['trainer_sex_valid'] == "0", 'trainer_sex_valid'] = "<NULL>"
+ 
+        # pedigree_0_valid から pedigree_13_valid: 血統情報
+        for i in range(14):
+            col_name = f'pedigree_{i}_valid'
+            raw_col_name = f'pedigree_{i}_raw'
+            data[col_name] = data[raw_col_name].fillna("<NULL>")
+            data.loc[data[col_name] == "0000000000", col_name] = "<NULL>"  # 0000000000は無効とする
 
         # ==========================================
         # ターゲット
@@ -218,6 +344,12 @@ class HorguesDataset(Dataset):
                 "horse_weight": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
                 "weight_change": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
                 "distance": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
+                "race_number": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
+                "registration_count": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
+                "horse_number": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
+                "frame_number": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
+                "horse_age": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
+                "burden_weight": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
             },
             "x_cat": {
                 "horse_id": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
@@ -226,6 +358,28 @@ class HorguesDataset(Dataset):
                 'track_type': np.full((num_races, self.max_horses), "<NULL>", dtype=object),
                 "weather": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
                 "track_cond": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "grade": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "course": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "sex": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "trainer_area": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "trainer_id": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "blinker_use": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "jockey_sex": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "trainer_sex": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "pedigree_0": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "pedigree_1": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "pedigree_2": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "pedigree_3": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "pedigree_4": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "pedigree_5": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "pedigree_6": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "pedigree_7": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "pedigree_8": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "pedigree_9": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "pedigree_10": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "pedigree_11": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "pedigree_12": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "pedigree_13": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
             },
             "sequence_data": {
                 "horse_weight_history": {
@@ -276,6 +430,12 @@ class HorguesDataset(Dataset):
                 self.built_data['x_num']['horse_weight'][race_idx, horse_idx] = row['horse_weight_numeric']
                 self.built_data['x_num']['weight_change'][race_idx, horse_idx] = row['weight_change_numeric']
                 self.built_data['x_num']['distance'][race_idx, horse_idx] = row['distance_numeric']
+                self.built_data['x_num']['race_number'][race_idx, horse_idx] = row['race_number_numeric']
+                self.built_data['x_num']['registration_count'][race_idx, horse_idx] = row['registration_count_numeric']
+                self.built_data['x_num']['horse_number'][race_idx, horse_idx] = row['horse_number_numeric']
+                self.built_data['x_num']['frame_number'][race_idx, horse_idx] = row['frame_number_numeric']
+                self.built_data['x_num']['horse_age'][race_idx, horse_idx] = row['horse_age_numeric']
+                self.built_data['x_num']['burden_weight'][race_idx, horse_idx] = row['burden_weight_numeric']
 
                 # カテゴリ特徴量
                 self.built_data['x_cat']['horse_id'][race_idx, horse_idx] = row['horse_id_valid']
@@ -284,6 +444,28 @@ class HorguesDataset(Dataset):
                 self.built_data['x_cat']['track_type'][race_idx, horse_idx] = row['track_type_valid']
                 self.built_data['x_cat']['weather'][race_idx, horse_idx] = row['weather_valid']
                 self.built_data['x_cat']['track_cond'][race_idx, horse_idx] = row['track_cond_valid']
+                self.built_data['x_cat']['grade'][race_idx, horse_idx] = row['grade_valid']
+                self.built_data['x_cat']['course'][race_idx, horse_idx] = row['course_valid']
+                self.built_data['x_cat']['sex'][race_idx, horse_idx] = row['sex_valid']
+                self.built_data['x_cat']['trainer_area'][race_idx, horse_idx] = row['trainer_area_valid']
+                self.built_data['x_cat']['trainer_id'][race_idx, horse_idx] = row['trainer_id_valid']
+                self.built_data['x_cat']['blinker_use'][race_idx, horse_idx] = row['blinker_use_valid']
+                self.built_data['x_cat']['jockey_sex'][race_idx, horse_idx] = row['jockey_sex_valid']
+                self.built_data['x_cat']['trainer_sex'][race_idx, horse_idx] = row['trainer_sex_valid']
+                self.built_data['x_cat']['pedigree_0'][race_idx, horse_idx] = row['pedigree_0_valid']
+                self.built_data['x_cat']['pedigree_1'][race_idx, horse_idx] = row['pedigree_1_valid']
+                self.built_data['x_cat']['pedigree_2'][race_idx, horse_idx] = row['pedigree_2_valid']
+                self.built_data['x_cat']['pedigree_3'][race_idx, horse_idx] = row['pedigree_3_valid']
+                self.built_data['x_cat']['pedigree_4'][race_idx, horse_idx] = row['pedigree_4_valid']
+                self.built_data['x_cat']['pedigree_5'][race_idx, horse_idx] = row['pedigree_5_valid']
+                self.built_data['x_cat']['pedigree_6'][race_idx, horse_idx] = row['pedigree_6_valid']
+                self.built_data['x_cat']['pedigree_7'][race_idx, horse_idx] = row['pedigree_7_valid']
+                self.built_data['x_cat']['pedigree_8'][race_idx, horse_idx] = row['pedigree_8_valid']
+                self.built_data['x_cat']['pedigree_9'][race_idx, horse_idx] = row['pedigree_9_valid']
+                self.built_data['x_cat']['pedigree_10'][race_idx, horse_idx] = row['pedigree_10_valid']
+                self.built_data['x_cat']['pedigree_11'][race_idx, horse_idx] = row['pedigree_11_valid']
+                self.built_data['x_cat']['pedigree_12'][race_idx, horse_idx] = row['pedigree_12_valid']
+                self.built_data['x_cat']['pedigree_13'][race_idx, horse_idx] = row['pedigree_13_valid']
 
                 # ターゲット
                 self.built_data['rankings'][race_idx, horse_idx] = row['ranking_int']  # ranking_intを使用
@@ -310,7 +492,28 @@ class HorguesDataset(Dataset):
         return self
 
     def fit(self):
-        self.params = {'numerical': {}, 'categorical': {}, 'aliases': {}}  # エイリアスはここで設定する
+        # エイリアス設定（血統情報を統一）
+        self.params = {
+            'numerical': {}, 
+            'categorical': {}, 
+            'aliases': {
+                # 血統情報のエイリアス（全世代統一）
+                'pedigree_0': 'pedigree',
+                'pedigree_1': 'pedigree',
+                'pedigree_2': 'pedigree',
+                'pedigree_3': 'pedigree',
+                'pedigree_4': 'pedigree',
+                'pedigree_5': 'pedigree',
+                'pedigree_6': 'pedigree',
+                'pedigree_7': 'pedigree',
+                'pedigree_8': 'pedigree',
+                'pedigree_9': 'pedigree',
+                'pedigree_10': 'pedigree',
+                'pedigree_11': 'pedigree',
+                'pedigree_12': 'pedigree',
+                'pedigree_13': 'pedigree',
+            }
+        }
 
         # 特徴量の収集
         feature_values = {'numerical': defaultdict(lambda: np.full(0, np.nan, dtype=np.float32)), 'categorical': defaultdict(lambda: np.full(0, "<NULL>", dtype=object))}

@@ -259,12 +259,18 @@ class TransformerBlock(nn.Module):
 class SequenceTransformer(nn.Module):
     """時系列データ処理用のTransformer (CLSトークンを出力)"""
 
-    def __init__(self, d_token: int = 192, n_layers: int = 3, n_heads: int = 8, d_ffn: int = None, dropout: float = 0.1):
+    def __init__(self, d_token: int = 192, n_layers: int = 3, n_heads: int = 8, d_ffn: int = None, 
+                 dropout: float = 0.1, max_seq_len: int = 512):
         super().__init__()
         self.d_token = d_token
+        self.max_seq_len = max_seq_len
 
         # [CLS]トークン
         self.cls_token = nn.Parameter(torch.randn(1, 1, d_token))
+
+        # 学習可能な位置エンコーディング
+        # CLSトークン + 最大シーケンス長分を用意
+        self.position_embeddings = nn.Parameter(torch.randn(1, max_seq_len + 1, d_token))
 
         self.transformer_blocks = nn.ModuleList([
             TransformerBlock(d_token, n_heads, d_ffn, dropout) for _ in range(n_layers)
@@ -285,12 +291,25 @@ class SequenceTransformer(nn.Module):
         *batch_dims, seq_len, d_token = sequence_tokens.shape
         batch_size = int(np.prod(batch_dims))
         
+        # シーケンス長のチェック
+        if seq_len > self.max_seq_len:
+            logger.warning(f"Sequence length {seq_len} exceeds max_seq_len {self.max_seq_len}. Truncating.")
+            sequence_tokens = sequence_tokens[..., :self.max_seq_len, :]
+            if mask is not None:
+                mask = mask[..., :self.max_seq_len]
+            seq_len = self.max_seq_len
+        
         # バッチ次元をまとめる
         sequence_tokens_flat = sequence_tokens.view(batch_size, seq_len, d_token)
 
         # [CLS]トークンを先頭に追加
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # (batch_size, 1, d_token)
         tokens_with_cls = torch.cat([cls_tokens, sequence_tokens_flat], dim=1)  # (batch_size, seq_len + 1, d_token)
+
+        # 位置エンコーディングを追加
+        seq_len_with_cls = seq_len + 1
+        pos_embeddings = self.position_embeddings[:, :seq_len_with_cls, :]  # (1, seq_len + 1, d_token)
+        tokens_with_cls = tokens_with_cls + pos_embeddings
 
         # マスクも[CLS]トークン分を拡張
         if mask is not None:
