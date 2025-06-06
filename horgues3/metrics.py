@@ -68,7 +68,7 @@ class BettingAccuracyMetric(BaseMetric):
                  top_k_list: List[int] = [1, 3, 5]):
         super().__init__(rankings, mask, winning_tickets, odds)
         self.top_k_list = top_k_list
-        self.bet_types = ['tansho', 'fukusho', 'umaren', 'umatan', 'wide', 'sanrentan']
+        self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide', 'umatan', 'sanrenfuku', 'sanrentan']
     
     def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
         if self.winning_tickets is None:
@@ -163,7 +163,7 @@ class BettingProfitMetric(BaseMetric):
                  bet_amount: float = 100.0):
         super().__init__(rankings, mask, winning_tickets, odds)
         self.bet_amount = bet_amount
-        self.bet_types = ['tansho', 'fukusho', 'umaren', 'umatan', 'wide', 'sanrentan']
+        self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide', 'umatan', 'sanrenfuku', 'sanrentan']
     
     def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
         if self.winning_tickets is None or self.odds is None:
@@ -254,7 +254,7 @@ class BettingCalibrationMetric(BaseMetric):
                  n_bins: int = 10):
         super().__init__(rankings, mask, winning_tickets, odds)
         self.n_bins = n_bins
-        self.bet_types = ['tansho', 'fukusho', 'umaren', 'umatan']
+        self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide', 'umatan']
     
     def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
         if self.winning_tickets is None:
