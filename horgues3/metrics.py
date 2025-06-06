@@ -45,36 +45,28 @@ class BaseMetric:
 
 class BettingAccuracyMetric(BaseMetric):
     """
-    馬券種ごとの的中率メトリクス
+    馬券的中精度メトリクス
     
     概要:
-        予測モデルが各馬券種で的中を狙える精度を測定するメトリクスです。
-        最高確率の組み合わせや上位k件の組み合わせがどの程度的中するかを評価します。
+        予測モデルの基本的な的中能力を測定します。
+        最高確率の組み合わせや上位候補の的中率を評価します。
     
-    使い道:
-        - モデルの予測精度の基本評価
-        - 各馬券種における予測の信頼性確認
-        - 実際の馬券購入戦略の効果測定
-        - 異なるモデル間の性能比較
-        
     出力メトリクス:
-        - hit_rate: 最高確率の組み合わせの的中率
-        - top_k_hit_rate: 上位k件以内の的中率 (k=1,3,5)
+        - hit_rate: 最高確率組み合わせの的中率
+        - top_3_hit_rate: 上位3位以内の的中率
     """
     
     def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None,
                  winning_tickets: Optional[Dict[str, np.ndarray]] = None,
-                 odds: Optional[Dict[str, np.ndarray]] = None,
-                 top_k_list: List[int] = [1, 3, 5]):
+                 odds: Optional[Dict[str, np.ndarray]] = None):
         super().__init__(rankings, mask, winning_tickets, odds)
-        self.top_k_list = top_k_list
         self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide', 'umatan', 'sanrenfuku', 'sanrentan']
     
     def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
         if self.winning_tickets is None:
             return {}
         
-        metrics = {'betting_accuracy': {}}
+        metrics = {'accuracy': {}}
         
         for bet_type in self.bet_types:
             if bet_type not in probabilities or bet_type not in self.winning_tickets:
@@ -84,10 +76,8 @@ class BettingAccuracyMetric(BaseMetric):
             winning_tickets = self.winning_tickets[bet_type]
             num_races = pred_probs.shape[0]
             
-            bet_metrics = {}
-            
-            # 基本的中率計算
             top1_hits = 0
+            top3_hits = 0
             valid_races = 0
             
             for race_idx in range(num_races):
@@ -100,76 +90,62 @@ class BettingAccuracyMetric(BaseMetric):
                 
                 valid_races += 1
                 
-                # 最高確率の組み合わせが的中しているか
+                # 最高確率の組み合わせ
                 top_combo_idx = np.argmax(race_probs)
                 if race_winning[top_combo_idx]:
                     top1_hits += 1
+                
+                # 上位3位以内
+                top_3_indices = np.argsort(race_probs)[::-1][:3]
+                if race_winning[top_3_indices].any():
+                    top3_hits += 1
             
             if valid_races > 0:
-                bet_metrics['hit_rate'] = top1_hits / valid_races
-            
-            # 上位k位以内的中率
-            top_k_metrics = {}
-            for k in self.top_k_list:
-                topk_hits = 0
-                valid_races_k = 0
-                
-                for race_idx in range(num_races):
-                    race_probs = pred_probs[race_idx]
-                    race_winning = winning_tickets[race_idx]
-                    
-                    valid_combos = race_probs > 0
-                    if not valid_combos.any():
-                        continue
-                    
-                    valid_races_k += 1
-                    top_k_indices = np.argsort(race_probs)[::-1][:k]
-                    
-                    if race_winning[top_k_indices].any():
-                        topk_hits += 1
-                
-                if valid_races_k > 0:
-                    top_k_metrics[f'top_{k}'] = topk_hits / valid_races_k
-            
-            bet_metrics['top_k_hit_rates'] = top_k_metrics
-            metrics['betting_accuracy'][bet_type] = bet_metrics
+                metrics['accuracy'][bet_type] = {
+                    'hit_rate': top1_hits / valid_races,
+                    'top_3_hit_rate': top3_hits / valid_races,
+                    'num_races': valid_races
+                }
         
         return metrics
 
 
-class BettingProfitMetric(BaseMetric):
+class ExpectedValueBettingMetric(BaseMetric):
     """
-    馬券種ごとの収益性メトリクス
+    期待値ベース投資戦略メトリクス
     
     概要:
-        実際の馬券購入を想定した収益性を測定するメトリクスです。
-        予測に基づいて馬券を購入した場合の回収率、利益率、勝率を計算します。
+        期待値が1.0を超える馬券のみを購入する戦略での収益性を評価します。
+        期待値 = 予測確率 × オッズ が1.0を超える場合のみ投資し、
+        長期的な収益性を測定します。
     
     使い道:
-        - 実際の馬券投資での収益性評価
-        - リスク管理とポートフォリオ最適化
-        - 馬券種別の投資戦略立案
-        - 長期的な投資効果の検証
+        - 期待値理論に基づく投資戦略の評価
+        - 長期的な収益安定性の確認
+        - リスク管理された投資手法の検証
+        - 予測精度とオッズのバランス評価
         
     出力メトリクス:
         - recovery_rate: 回収率（払戻金/投資金額）
         - profit_rate: 利益率（(払戻金-投資金額)/投資金額）
-        - win_rate: 勝率（利益が出たレースの割合）
+        - bet_frequency: 投資頻度（期待値>1.0のレース割合）
+        - avg_expected_value: 投資時の平均期待値
     """
     
     def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None,
                  winning_tickets: Optional[Dict[str, np.ndarray]] = None,
                  odds: Optional[Dict[str, np.ndarray]] = None,
-                 bet_amount: float = 100.0):
+                 bet_amount: float = 100.0, min_expected_value: float = 1.05):
         super().__init__(rankings, mask, winning_tickets, odds)
         self.bet_amount = bet_amount
-        self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide', 'umatan', 'sanrenfuku', 'sanrentan']
+        self.min_expected_value = min_expected_value
+        self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide', 'umatan']
     
     def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
         if self.winning_tickets is None or self.odds is None:
             return {}
         
-        metrics = {'betting_profit': {}}
+        metrics = {'expected_value_betting': {}}
         
         for bet_type in self.bet_types:
             if (bet_type not in probabilities or 
@@ -184,7 +160,9 @@ class BettingProfitMetric(BaseMetric):
             
             total_bet = 0.0
             total_payout = 0.0
-            profits = []
+            bet_count = 0
+            total_races = 0
+            expected_values = []
             
             for race_idx in range(num_races):
                 race_probs = pred_probs[race_idx]
@@ -195,57 +173,63 @@ class BettingProfitMetric(BaseMetric):
                 if not valid_combos.any():
                     continue
                 
-                valid_probs = race_probs.copy()
-                valid_probs[~valid_combos] = 0
-                top_combo_idx = np.argmax(valid_probs)
+                total_races += 1
                 
-                total_bet += self.bet_amount
-                race_profit = -self.bet_amount
+                # 期待値計算
+                expected_values_race = race_probs * race_odds
+                valid_expected_values = expected_values_race[valid_combos]
                 
-                if race_winning[top_combo_idx]:
-                    payout = self.bet_amount * race_odds[top_combo_idx]
-                    total_payout += payout
-                    race_profit += payout
+                # 期待値が閾値を超える組み合わせを探す
+                best_combo_idx = None
+                best_expected_value = 0
                 
-                profits.append(race_profit)
+                for combo_idx in np.where(valid_combos)[0]:
+                    ev = expected_values_race[combo_idx]
+                    if ev >= self.min_expected_value and ev > best_expected_value:
+                        best_expected_value = ev
+                        best_combo_idx = combo_idx
+                
+                if best_combo_idx is not None:
+                    bet_count += 1
+                    total_bet += self.bet_amount
+                    expected_values.append(best_expected_value)
+                    
+                    if race_winning[best_combo_idx]:
+                        payout = self.bet_amount * race_odds[best_combo_idx]
+                        total_payout += payout
             
             bet_metrics = {}
             if total_bet > 0:
                 bet_metrics['recovery_rate'] = total_payout / total_bet
                 bet_metrics['profit_rate'] = (total_payout - total_bet) / total_bet
-                
-                if profits:
-                    bet_metrics['win_rate'] = np.mean(np.array(profits) > 0)
+                bet_metrics['bet_frequency'] = bet_count / total_races if total_races > 0 else 0
+                bet_metrics['avg_expected_value'] = np.mean(expected_values) if expected_values else 0
                 
                 bet_metrics['summary'] = {
                     'total_bet': total_bet,
                     'total_payout': total_payout,
                     'net_profit': total_payout - total_bet,
-                    'num_races': len(profits)
+                    'bet_count': bet_count,
+                    'total_races': total_races,
+                    'min_ev_threshold': self.min_expected_value
                 }
             
-            metrics['betting_profit'][bet_type] = bet_metrics
+            metrics['expected_value_betting'][bet_type] = bet_metrics
         
         return metrics
 
 
 class BettingCalibrationMetric(BaseMetric):
     """
-    予測確率の較正メトリクス
+    予測確率較正メトリクス
     
     概要:
-        予測確率が実際の的中確率とどの程度一致しているかを測定するメトリクスです。
-        モデルが出力する確率の信頼性と較正度を評価します。
+        モデルが出力する確率が実際の的中確率と一致しているかを評価します。
+        確率予測の信頼性を測定する重要なメトリクスです。
     
-    使い道:
-        - 予測確率の信頼性評価
-        - モデルの較正性能の診断
-        - 確率的予測の品質改善
-        - 異なるモデルの確率精度比較
-        
     出力メトリクス:
-        - brier_score: ブライアスコア（確率予測の二乗誤差）
-        - calibration_error: 較正エラー（予測確率と実際の確率の差）
+        - brier_score: ブライアスコア（確率予測の精度）
+        - calibration_error: 較正エラー（予測確率と実確率の差）
     """
     
     def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None,
@@ -254,13 +238,13 @@ class BettingCalibrationMetric(BaseMetric):
                  n_bins: int = 10):
         super().__init__(rankings, mask, winning_tickets, odds)
         self.n_bins = n_bins
-        self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide', 'umatan']
+        self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide']
     
     def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
         if self.winning_tickets is None:
             return {}
         
-        metrics = {'betting_calibration': {}}
+        metrics = {'calibration': {}}
         
         for bet_type in self.bet_types:
             if bet_type not in probabilities or bet_type not in self.winning_tickets:
@@ -287,17 +271,13 @@ class BettingCalibrationMetric(BaseMetric):
             all_probs = np.array(all_probs)
             all_outcomes = np.array(all_outcomes)
             
-            bet_metrics = {}
-            
             # ブライアスコア
             brier_score = np.mean((all_probs - all_outcomes) ** 2)
-            bet_metrics['brier_score'] = brier_score
             
             # 較正エラー
             bin_boundaries = np.linspace(0, 1, self.n_bins + 1)
             calibration_error = 0.0
             total_samples = len(all_probs)
-            bin_details = {}
             
             for i in range(self.n_bins):
                 bin_lower = bin_boundaries[i]
@@ -312,19 +292,11 @@ class BettingCalibrationMetric(BaseMetric):
                     bin_weight = bin_size / total_samples
                     bin_error = abs(bin_confidence - bin_accuracy)
                     calibration_error += bin_weight * bin_error
-                    
-                    bin_details[f'bin_{i+1}'] = {
-                        'range': f'{bin_lower:.2f}-{bin_upper:.2f}',
-                        'confidence': bin_confidence,
-                        'accuracy': bin_accuracy,
-                        'error': bin_error,
-                        'count': bin_size
-                    }
             
-            bet_metrics['calibration_error'] = calibration_error
-            bet_metrics['bin_analysis'] = bin_details
-            
-            metrics['betting_calibration'][bet_type] = bet_metrics
+            metrics['calibration'][bet_type] = {
+                'brier_score': brier_score,
+                'calibration_error': calibration_error
+            }
         
         return metrics
 
@@ -334,17 +306,11 @@ class RankCorrelationMetric(BaseMetric):
     順位相関メトリクス
     
     概要:
-        予測した馬の強さ順位と実際の着順の相関を測定するメトリクスです。
-        単勝確率に基づく予測順位と実際の着順の一致度を評価します。
+        単勝確率に基づく予測順位と実際の着順の相関を測定します。
+        馬の強さ予測の基本的な妥当性を評価します。
     
-    使い道:
-        - 馬の強さ予測の精度評価
-        - 順位予測モデルの性能測定
-        - レース予測の基本的な妥当性確認
-        - 回帰問題としての着順予測評価
-        
     出力メトリクス:
-        - spearman_corr: スピアマン順位相関係数（順位の一致度）
+        - spearman_corr: スピアマン順位相関係数
     """
     
     def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
@@ -354,7 +320,6 @@ class RankCorrelationMetric(BaseMetric):
         scores = probabilities['tansho']
         num_races = scores.shape[0]
         spearman_corrs = []
-        race_details = []
         
         for race_idx in range(num_races):
             race_scores = scores[race_idx]
@@ -381,25 +346,14 @@ class RankCorrelationMetric(BaseMetric):
                 spear_corr, _ = spearmanr(pred_ranks, final_rankings)
                 if not np.isnan(spear_corr):
                     spearman_corrs.append(spear_corr)
-                    race_details.append({
-                        'race_idx': race_idx,
-                        'correlation': spear_corr,
-                        'num_horses': len(final_scores)
-                    })
             except Exception:
                 continue
         
-        metrics = {'rank_correlation': {}}
+        metrics = {}
         if spearman_corrs:
             metrics['rank_correlation'] = {
                 'spearman_corr': np.mean(spearman_corrs),
-                'summary': {
-                    'mean_correlation': np.mean(spearman_corrs),
-                    'std_correlation': np.std(spearman_corrs),
-                    'min_correlation': np.min(spearman_corrs),
-                    'max_correlation': np.max(spearman_corrs),
-                    'num_races': len(spearman_corrs)
-                }
+                'num_races': len(spearman_corrs)
             }
         
         return metrics
