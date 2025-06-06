@@ -199,9 +199,8 @@ def calculate_betting_probabilities(horse_strengths, mask=None, temperature=1.0)
     return probabilities
 
 
-def get_betting_combinations():
+def get_betting_combinations(max_horses=18):
     """各馬券種の組み合わせインデックスを返す"""
-    max_horses = 18
     combinations = {}
     
     # 単勝・複勝（馬番のみ）
@@ -245,6 +244,156 @@ def get_betting_combinations():
     combinations['sanrentan'] = sanrentan_triplets
     
     return combinations
+
+
+def extract_winning_tickets(rankings, mask=None, max_horses=18):
+    """
+    着順データから各馬券種の的中馬券を抽出する
+    
+    Args:
+        rankings: 着順データ (num_races, num_horses) - 1-indexed、0は無効
+        mask: 有効な馬のマスク (num_races, num_horses) - 1=有効、0=無効/パディング
+        max_horses: 最大馬数
+        
+    Returns:
+        winning_tickets: 各馬券種の的中馬券を格納した辞書
+            各値は (num_races, num_combinations) のboolean配列
+    """
+    num_races, num_horses = rankings.shape
+    
+    # マスクが指定されていない場合はすべて有効とみなす
+    if mask is None:
+        mask = np.ones_like(rankings, dtype=bool)
+    else:
+        mask = mask.astype(bool)
+    
+    # 組み合わせ情報を取得
+    combinations = get_betting_combinations(max_horses)
+    
+    # 結果を格納する辞書
+    winning_tickets = {}
+    
+    for race_idx in range(num_races):
+        race_rankings = rankings[race_idx]
+        race_mask = mask[race_idx]
+        
+        # 有効な馬のみを抽出
+        valid_horses = np.where(race_mask)[0]
+        if len(valid_horses) == 0:
+            continue
+            
+        valid_rankings = race_rankings[valid_horses]
+        
+        # 無効な着順を除外
+        valid_rank_mask = valid_rankings > 0
+        if not valid_rank_mask.any():
+            continue
+            
+        final_horses = valid_horses[valid_rank_mask]
+        final_rankings = valid_rankings[valid_rank_mask]
+        
+        # 着順から順位を特定（0-indexed）
+        horse_to_rank = {}
+        for horse_idx, rank in zip(final_horses, final_rankings):
+            horse_to_rank[horse_idx] = rank - 1  # 0-indexedに変換
+        
+        # 各着順の馬を特定
+        rank_to_horse = {}
+        for horse_idx, rank in horse_to_rank.items():
+            rank_to_horse[rank] = horse_idx
+        
+        # レースの的中馬券を初期化（初回のみ）
+        if race_idx == 0:
+            for bet_type in ['tansho', 'fukusho', 'umaren', 'umatan', 'wide', 'sanrenfuku', 'sanrentan']:
+                num_combinations = len(combinations[bet_type])
+                winning_tickets[bet_type] = np.zeros((num_races, num_combinations), dtype=bool)
+    
+    # 各レースの的中馬券を計算
+    for race_idx in range(num_races):
+        race_rankings = rankings[race_idx]
+        race_mask = mask[race_idx]
+        
+        # 有効な馬のみを抽出
+        valid_horses = np.where(race_mask)[0]
+        if len(valid_horses) == 0:
+            continue
+            
+        valid_rankings = race_rankings[valid_horses]
+        valid_rank_mask = valid_rankings > 0
+        if not valid_rank_mask.any():
+            continue
+            
+        final_horses = valid_horses[valid_rank_mask]
+        final_rankings = valid_rankings[valid_rank_mask]
+        
+        # 着順マッピングを作成
+        horse_to_rank = {}
+        for horse_idx, rank in zip(final_horses, final_rankings):
+            horse_to_rank[horse_idx] = rank - 1
+        
+        rank_to_horse = {}
+        for horse_idx, rank in horse_to_rank.items():
+            rank_to_horse[rank] = horse_idx
+        
+        # 単勝（1位の馬）
+        if 0 in rank_to_horse:
+            winner = rank_to_horse[0]
+            winning_tickets['tansho'][race_idx, winner] = True
+        
+        # 複勝（1〜3位の馬）
+        for rank in range(min(3, len(rank_to_horse))):
+            if rank in rank_to_horse:
+                horse = rank_to_horse[rank]
+                winning_tickets['fukusho'][race_idx, horse] = True
+        
+        # 2頭系馬券（馬連・馬単・ワイド）
+        if len(rank_to_horse) >= 2:
+            # 1-2位の組み合わせ
+            if 0 in rank_to_horse and 1 in rank_to_horse:
+                first = rank_to_horse[0]
+                second = rank_to_horse[1]
+                
+                # 馬連（順不同）
+                combo = tuple(sorted([first, second]))
+                combo_idx = combinations['umaren'].index(combo)
+                winning_tickets['umaren'][race_idx, combo_idx] = True
+                
+                # 馬単（順序あり）
+                combo = (first, second)
+                combo_idx = combinations['umatan'].index(combo)
+                winning_tickets['umatan'][race_idx, combo_idx] = True
+            
+            # ワイド（1-3位の2頭の組み合わせ）
+            top3_horses = []
+            for rank in range(min(3, len(rank_to_horse))):
+                if rank in rank_to_horse:
+                    top3_horses.append(rank_to_horse[rank])
+            
+            if len(top3_horses) >= 2:
+                for i in range(len(top3_horses)):
+                    for j in range(i + 1, len(top3_horses)):
+                        combo = tuple(sorted([top3_horses[i], top3_horses[j]]))
+                        combo_idx = combinations['wide'].index(combo)
+                        winning_tickets['wide'][race_idx, combo_idx] = True
+        
+        # 3頭系馬券（3連複・3連単）
+        if len(rank_to_horse) >= 3:
+            if 0 in rank_to_horse and 1 in rank_to_horse and 2 in rank_to_horse:
+                first = rank_to_horse[0]
+                second = rank_to_horse[1]
+                third = rank_to_horse[2]
+                
+                # 3連複（順不同）
+                combo = tuple(sorted([first, second, third]))
+                combo_idx = combinations['sanrenfuku'].index(combo)
+                winning_tickets['sanrenfuku'][race_idx, combo_idx] = True
+                
+                # 3連単（順序あり）
+                combo = (first, second, third)
+                combo_idx = combinations['sanrentan'].index(combo)
+                winning_tickets['sanrentan'][race_idx, combo_idx] = True
+    
+    return winning_tickets
 
 
 def format_betting_results(race_ids, probabilities, masks=None):

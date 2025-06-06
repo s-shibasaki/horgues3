@@ -15,18 +15,22 @@ class BaseMetric:
     Args:
         rankings: 正解の着順データ (num_races, num_horses) - 1-indexed、0は無効
         mask: 有効な馬のマスク (num_races, num_horses) - 1=有効、0=無効
-        odds: オッズデータ (辞書形式、各馬券種のオッズ配列)
+        winning_tickets: 的中馬券データ (各馬券種のboolean配列)
+        odds: オッズデータ (各馬券種のオッズ配列)
     """
     
-    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None, odds: Optional[Dict[str, np.ndarray]] = None):
+    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None, 
+                 winning_tickets: Optional[Dict[str, np.ndarray]] = None, 
+                 odds: Optional[Dict[str, np.ndarray]] = None):
         self.rankings = rankings
         if mask is None:
             self.mask = (rankings > 0).astype(bool)
         else:
             self.mask = mask.astype(bool)
+        self.winning_tickets = winning_tickets
         self.odds = odds
     
-    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, float]:
+    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
         """
         メトリクスを計算する
         
@@ -34,87 +38,294 @@ class BaseMetric:
             probabilities: 予測確率辞書 (各馬券種の確率配列)
             
         Returns:
-            計算されたメトリクス値の辞書
+            計算されたメトリクス値の階層化された辞書
         """
         raise NotImplementedError
 
 
-class AccuracyMetric(BaseMetric):
+class BettingAccuracyMetric(BaseMetric):
     """
-    着順予測精度メトリクス
+    馬券種ごとの的中率メトリクス
     
     概要:
-        予測スコアの順位と実際の着順がどの程度一致するかを測定する。
-        1位、複勝（1-3位）、上位k位などの的中率を計算。
+        予測モデルが各馬券種で的中を狙える精度を測定するメトリクスです。
+        最高確率の組み合わせや上位k件の組み合わせがどの程度的中するかを評価します。
     
-    計算方法:
-        - 1位的中率: 予測1位と実際1位が一致するレースの割合
-        - 複勝的中率: 予測上位3位が実際の上位3位に含まれる的中数の割合
-        - 上位k位的中率: 予測上位k位と実際の上位k位の重複数の平均
-    
-    値の読み方:
-        - 0.0〜1.0の範囲
-        - 1.0に近いほど予測精度が高い
-        - ランダム予測の場合、1位的中率は1/馬数、複勝的中率は3/馬数程度
+    使い道:
+        - モデルの予測精度の基本評価
+        - 各馬券種における予測の信頼性確認
+        - 実際の馬券購入戦略の効果測定
+        - 異なるモデル間の性能比較
+        
+    出力メトリクス:
+        - hit_rate: 最高確率の組み合わせの的中率
+        - top_k_hit_rate: 上位k件以内の的中率 (k=1,3,5)
     """
     
-    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None, 
-                 odds: Optional[Dict[str, np.ndarray]] = None, top_k_list: List[int] = [1, 3, 5]):
-        super().__init__(rankings, mask, odds)
+    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None,
+                 winning_tickets: Optional[Dict[str, np.ndarray]] = None,
+                 odds: Optional[Dict[str, np.ndarray]] = None,
+                 top_k_list: List[int] = [1, 3, 5]):
+        super().__init__(rankings, mask, winning_tickets, odds)
         self.top_k_list = top_k_list
+        self.bet_types = ['tansho', 'fukusho', 'umaren', 'umatan', 'wide', 'sanrentan']
     
-    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, float]:
-        # 単勝確率をスコアとして使用
-        scores = probabilities['tansho']
-        num_races = scores.shape[0]
-        metrics = {}
+    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
+        if self.winning_tickets is None:
+            return {}
         
-        for k in self.top_k_list:
-            total_hits = 0
-            total_possible = 0
+        metrics = {'betting_accuracy': {}}
+        
+        for bet_type in self.bet_types:
+            if bet_type not in probabilities or bet_type not in self.winning_tickets:
+                continue
+            
+            pred_probs = probabilities[bet_type]
+            winning_tickets = self.winning_tickets[bet_type]
+            num_races = pred_probs.shape[0]
+            
+            bet_metrics = {}
+            
+            # 基本的中率計算
+            top1_hits = 0
             valid_races = 0
             
             for race_idx in range(num_races):
-                race_scores = scores[race_idx]
-                race_rankings = self.rankings[race_idx]
-                race_mask = self.mask[race_idx]
+                race_probs = pred_probs[race_idx]
+                race_winning = winning_tickets[race_idx]
                 
-                # 有効な馬のみを抽出
-                valid_horses = np.where(race_mask)[0]
-                if len(valid_horses) < k:
+                valid_combos = race_probs > 0
+                if not valid_combos.any():
                     continue
                 
-                valid_scores = race_scores[valid_horses]
-                valid_rankings = race_rankings[valid_horses]
-                
-                # 無効な着順を除外
-                valid_rank_mask = valid_rankings > 0
-                if not valid_rank_mask.any() or valid_rank_mask.sum() < k:
-                    continue
-                
-                final_scores = valid_scores[valid_rank_mask]
-                final_rankings = valid_rankings[valid_rank_mask]
-                
-                # 予測上位k位の馬のインデックス
-                pred_top_k = np.argsort(final_scores)[::-1][:k]
-                
-                # 実際の上位k位の馬のインデックス
-                actual_top_k = np.argsort(final_rankings)[:k]
-                
-                # 的中数を計算
-                hits = len(set(pred_top_k) & set(actual_top_k))
-                total_hits += hits
-                total_possible += k
                 valid_races += 1
+                
+                # 最高確率の組み合わせが的中しているか
+                top_combo_idx = np.argmax(race_probs)
+                if race_winning[top_combo_idx]:
+                    top1_hits += 1
             
             if valid_races > 0:
-                if k == 1:
-                    # 1位的中率は0または1の平均
-                    metrics[f'win_accuracy'] = total_hits / valid_races
-                else:
-                    # 上位k位の平均的中率
-                    metrics[f'top_{k}_accuracy'] = total_hits / total_possible
+                bet_metrics['hit_rate'] = top1_hits / valid_races
             
+            # 上位k位以内的中率
+            top_k_metrics = {}
+            for k in self.top_k_list:
+                topk_hits = 0
+                valid_races_k = 0
+                
+                for race_idx in range(num_races):
+                    race_probs = pred_probs[race_idx]
+                    race_winning = winning_tickets[race_idx]
+                    
+                    valid_combos = race_probs > 0
+                    if not valid_combos.any():
+                        continue
+                    
+                    valid_races_k += 1
+                    top_k_indices = np.argsort(race_probs)[::-1][:k]
+                    
+                    if race_winning[top_k_indices].any():
+                        topk_hits += 1
+                
+                if valid_races_k > 0:
+                    top_k_metrics[f'top_{k}'] = topk_hits / valid_races_k
+            
+            bet_metrics['top_k_hit_rates'] = top_k_metrics
+            metrics['betting_accuracy'][bet_type] = bet_metrics
+        
+        return metrics
+
+
+class BettingProfitMetric(BaseMetric):
+    """
+    馬券種ごとの収益性メトリクス
+    
+    概要:
+        実際の馬券購入を想定した収益性を測定するメトリクスです。
+        予測に基づいて馬券を購入した場合の回収率、利益率、勝率を計算します。
+    
+    使い道:
+        - 実際の馬券投資での収益性評価
+        - リスク管理とポートフォリオ最適化
+        - 馬券種別の投資戦略立案
+        - 長期的な投資効果の検証
+        
+    出力メトリクス:
+        - recovery_rate: 回収率（払戻金/投資金額）
+        - profit_rate: 利益率（(払戻金-投資金額)/投資金額）
+        - win_rate: 勝率（利益が出たレースの割合）
+    """
+    
+    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None,
+                 winning_tickets: Optional[Dict[str, np.ndarray]] = None,
+                 odds: Optional[Dict[str, np.ndarray]] = None,
+                 bet_amount: float = 100.0):
+        super().__init__(rankings, mask, winning_tickets, odds)
+        self.bet_amount = bet_amount
+        self.bet_types = ['tansho', 'fukusho', 'umaren', 'umatan', 'wide', 'sanrentan']
+    
+    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
+        if self.winning_tickets is None or self.odds is None:
+            return {}
+        
+        metrics = {'betting_profit': {}}
+        
+        for bet_type in self.bet_types:
+            if (bet_type not in probabilities or 
+                bet_type not in self.winning_tickets or 
+                bet_type not in self.odds):
+                continue
+            
+            pred_probs = probabilities[bet_type]
+            winning_tickets = self.winning_tickets[bet_type]
+            odds_data = self.odds[bet_type]
+            num_races = pred_probs.shape[0]
+            
+            total_bet = 0.0
+            total_payout = 0.0
+            profits = []
+            
+            for race_idx in range(num_races):
+                race_probs = pred_probs[race_idx]
+                race_winning = winning_tickets[race_idx]
+                race_odds = odds_data[race_idx]
+                
+                valid_combos = (race_probs > 0) & ~np.isnan(race_odds) & (race_odds > 0)
+                if not valid_combos.any():
+                    continue
+                
+                valid_probs = race_probs.copy()
+                valid_probs[~valid_combos] = 0
+                top_combo_idx = np.argmax(valid_probs)
+                
+                total_bet += self.bet_amount
+                race_profit = -self.bet_amount
+                
+                if race_winning[top_combo_idx]:
+                    payout = self.bet_amount * race_odds[top_combo_idx]
+                    total_payout += payout
+                    race_profit += payout
+                
+                profits.append(race_profit)
+            
+            bet_metrics = {}
+            if total_bet > 0:
+                bet_metrics['recovery_rate'] = total_payout / total_bet
+                bet_metrics['profit_rate'] = (total_payout - total_bet) / total_bet
+                
+                if profits:
+                    bet_metrics['win_rate'] = np.mean(np.array(profits) > 0)
+                
+                bet_metrics['summary'] = {
+                    'total_bet': total_bet,
+                    'total_payout': total_payout,
+                    'net_profit': total_payout - total_bet,
+                    'num_races': len(profits)
+                }
+            
+            metrics['betting_profit'][bet_type] = bet_metrics
+        
+        return metrics
+
+
+class BettingCalibrationMetric(BaseMetric):
+    """
+    予測確率の較正メトリクス
+    
+    概要:
+        予測確率が実際の的中確率とどの程度一致しているかを測定するメトリクスです。
+        モデルが出力する確率の信頼性と較正度を評価します。
+    
+    使い道:
+        - 予測確率の信頼性評価
+        - モデルの較正性能の診断
+        - 確率的予測の品質改善
+        - 異なるモデルの確率精度比較
+        
+    出力メトリクス:
+        - brier_score: ブライアスコア（確率予測の二乗誤差）
+        - calibration_error: 較正エラー（予測確率と実際の確率の差）
+    """
+    
+    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None,
+                 winning_tickets: Optional[Dict[str, np.ndarray]] = None,
+                 odds: Optional[Dict[str, np.ndarray]] = None,
+                 n_bins: int = 10):
+        super().__init__(rankings, mask, winning_tickets, odds)
+        self.n_bins = n_bins
+        self.bet_types = ['tansho', 'fukusho', 'umaren', 'umatan']
+    
+    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
+        if self.winning_tickets is None:
+            return {}
+        
+        metrics = {'betting_calibration': {}}
+        
+        for bet_type in self.bet_types:
+            if bet_type not in probabilities or bet_type not in self.winning_tickets:
+                continue
+            
+            pred_probs = probabilities[bet_type]
+            winning_tickets = self.winning_tickets[bet_type]
+            
+            all_probs = []
+            all_outcomes = []
+            
+            num_races = pred_probs.shape[0]
+            for race_idx in range(num_races):
+                race_probs = pred_probs[race_idx]
+                race_winning = winning_tickets[race_idx]
+                
+                valid_mask = race_probs > 0
+                all_probs.extend(race_probs[valid_mask])
+                all_outcomes.extend(race_winning[valid_mask].astype(float))
+            
+            if len(all_probs) == 0:
+                continue
+            
+            all_probs = np.array(all_probs)
+            all_outcomes = np.array(all_outcomes)
+            
+            bet_metrics = {}
+            
+            # ブライアスコア
+            brier_score = np.mean((all_probs - all_outcomes) ** 2)
+            bet_metrics['brier_score'] = brier_score
+            
+            # 較正エラー
+            bin_boundaries = np.linspace(0, 1, self.n_bins + 1)
+            calibration_error = 0.0
+            total_samples = len(all_probs)
+            bin_details = {}
+            
+            for i in range(self.n_bins):
+                bin_lower = bin_boundaries[i]
+                bin_upper = bin_boundaries[i + 1]
+                
+                in_bin = (all_probs > bin_lower) & (all_probs <= bin_upper)
+                bin_size = in_bin.sum()
+                
+                if bin_size > 0:
+                    bin_accuracy = all_outcomes[in_bin].mean()
+                    bin_confidence = all_probs[in_bin].mean()
+                    bin_weight = bin_size / total_samples
+                    bin_error = abs(bin_confidence - bin_accuracy)
+                    calibration_error += bin_weight * bin_error
+                    
+                    bin_details[f'bin_{i+1}'] = {
+                        'range': f'{bin_lower:.2f}-{bin_upper:.2f}',
+                        'confidence': bin_confidence,
+                        'accuracy': bin_accuracy,
+                        'error': bin_error,
+                        'count': bin_size
+                    }
+            
+            bet_metrics['calibration_error'] = calibration_error
+            bet_metrics['bin_analysis'] = bin_details
+            
+            metrics['betting_calibration'][bet_type] = bet_metrics
+        
         return metrics
 
 
@@ -123,45 +334,40 @@ class RankCorrelationMetric(BaseMetric):
     順位相関メトリクス
     
     概要:
-        予測スコアによる順位と実際の着順の相関を測定する。
-        スピアマン順位相関係数とケンドールのタウを計算。
+        予測した馬の強さ順位と実際の着順の相関を測定するメトリクスです。
+        単勝確率に基づく予測順位と実際の着順の一致度を評価します。
     
-    計算方法:
-        - スピアマン相関: ピアソン相関の順位版、線形関係を測定
-        - ケンドールのタウ: 順位の一致・不一致ペア数から計算、単調関係を測定
-        - 各レースで計算し、有効なレースの平均値を取る
-    
-    値の読み方:
-        - -1.0〜1.0の範囲
-        - 1.0に近いほど予測順位と実際の順位が正の相関
-        - 0.0はランダム、-1.0は完全に逆の順位
-        - 0.3以上で弱い相関、0.5以上で中程度の相関
+    使い道:
+        - 馬の強さ予測の精度評価
+        - 順位予測モデルの性能測定
+        - レース予測の基本的な妥当性確認
+        - 回帰問題としての着順予測評価
+        
+    出力メトリクス:
+        - spearman_corr: スピアマン順位相関係数（順位の一致度）
     """
     
-    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None, odds: Optional[Dict[str, np.ndarray]] = None):
-        super().__init__(rankings, mask, odds)
-    
-    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, float]:
-        # 単勝確率をスコアとして使用
+    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
+        if 'tansho' not in probabilities:
+            return {}
+        
         scores = probabilities['tansho']
         num_races = scores.shape[0]
         spearman_corrs = []
-        kendall_corrs = []
+        race_details = []
         
         for race_idx in range(num_races):
             race_scores = scores[race_idx]
             race_rankings = self.rankings[race_idx]
             race_mask = self.mask[race_idx]
             
-            # 有効な馬のみを抽出
             valid_horses = np.where(race_mask)[0]
-            if len(valid_horses) < 3:  # 相関計算には最低3頭必要
+            if len(valid_horses) < 3:
                 continue
             
             valid_scores = race_scores[valid_horses]
             valid_rankings = race_rankings[valid_horses]
             
-            # 無効な着順を除外
             valid_rank_mask = valid_rankings > 0
             if valid_rank_mask.sum() < 3:
                 continue
@@ -169,335 +375,31 @@ class RankCorrelationMetric(BaseMetric):
             final_scores = valid_scores[valid_rank_mask]
             final_rankings = valid_rankings[valid_rank_mask]
             
-            # 予測順位を計算（スコアが高いほど上位）
             pred_ranks = len(final_scores) + 1 - np.argsort(np.argsort(final_scores)) - 1
             
             try:
-                # スピアマン相関
                 spear_corr, _ = spearmanr(pred_ranks, final_rankings)
                 if not np.isnan(spear_corr):
                     spearman_corrs.append(spear_corr)
-                
-                # ケンドールのタウ
-                kendall_corr, _ = kendalltau(pred_ranks, final_rankings)
-                if not np.isnan(kendall_corr):
-                    kendall_corrs.append(kendall_corr)
-                    
-            except Exception as e:
+                    race_details.append({
+                        'race_idx': race_idx,
+                        'correlation': spear_corr,
+                        'num_horses': len(final_scores)
+                    })
+            except Exception:
                 continue
         
-        metrics = {}
+        metrics = {'rank_correlation': {}}
         if spearman_corrs:
-            metrics['spearman_corr'] = np.mean(spearman_corrs)
-            metrics['spearman_corr_std'] = np.std(spearman_corrs)
-        
-        if kendall_corrs:
-            metrics['kendall_tau'] = np.mean(kendall_corrs)
-            metrics['kendall_tau_std'] = np.std(kendall_corrs)
-        
-        return metrics
-
-
-class NDCGMetric(BaseMetric):
-    """
-    正規化割引累積利得（NDCG）メトリクス
-    
-    概要:
-        情報検索分野で使用される評価指標。上位の順位により大きな重みを付けて
-        予測順位の品質を評価する。競馬では上位の的中がより重要なため適している。
-    
-    計算方法:
-        - DCG = Σ(rel_i / log2(i+1)) where rel_iは位置iでの関連度
-        - IDCG = 理想的な順序でのDCG（完璧な予測時のDCG）
-        - NDCG = DCG / IDCG で正規化
-        - 関連度は着順の逆数を使用（1位=最高関連度）
-    
-    値の読み方:
-        - 0.0〜1.0の範囲
-        - 1.0に近いほど上位順位の予測精度が高い
-        - 0.5以上で良好、0.7以上で優秀な予測
-        - 上位重視の評価なので、下位の誤差より上位の誤差を重く評価
-    """
-    
-    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None, 
-                 odds: Optional[Dict[str, np.ndarray]] = None, k: int = 10):
-        super().__init__(rankings, mask, odds)
-        self.k = k
-    
-    def _dcg_at_k(self, relevances: np.ndarray, k: int) -> float:
-        """DCG@kを計算"""
-        k = min(k, len(relevances))
-        if k == 0:
-            return 0.0
-        
-        dcg = relevances[0]
-        for i in range(1, k):
-            dcg += relevances[i] / np.log2(i + 1)
-        return dcg
-    
-    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, float]:
-        # 単勝確率をスコアとして使用
-        scores = probabilities['tansho']
-        num_races = scores.shape[0]
-        ndcg_scores = []
-        
-        for race_idx in range(num_races):
-            race_scores = scores[race_idx]
-            race_rankings = self.rankings[race_idx]
-            race_mask = self.mask[race_idx]
-            
-            # 有効な馬のみを抽出
-            valid_horses = np.where(race_mask)[0]
-            if len(valid_horses) < 2:
-                continue
-            
-            valid_scores = race_scores[valid_horses]
-            valid_rankings = race_rankings[valid_horses]
-            
-            # 無効な着順を除外
-            valid_rank_mask = valid_rankings > 0
-            if valid_rank_mask.sum() < 2:
-                continue
-            
-            final_scores = valid_scores[valid_rank_mask]
-            final_rankings = valid_rankings[valid_rank_mask]
-            
-            # 関連度を計算（着順の逆数、1位が最大）
-            max_rank = len(final_rankings)
-            relevances = (max_rank + 1 - final_rankings) / max_rank
-            
-            # 予測順位でソート
-            pred_order = np.argsort(final_scores)[::-1]
-            pred_relevances = relevances[pred_order]
-            
-            # 理想的な順序（関連度の降順）
-            ideal_relevances = np.sort(relevances)[::-1]
-            
-            # DCG計算
-            dcg = self._dcg_at_k(pred_relevances, self.k)
-            idcg = self._dcg_at_k(ideal_relevances, self.k)
-            
-            if idcg > 0:
-                ndcg = dcg / idcg
-                ndcg_scores.append(ndcg)
-        
-        metrics = {}
-        if ndcg_scores:
-            metrics[f'ndcg@{self.k}'] = np.mean(ndcg_scores)
-            metrics[f'ndcg@{self.k}_std'] = np.std(ndcg_scores)
-        
-        return metrics
-
-
-class ReciprocalRankMetric(BaseMetric):
-    """
-    平均逆順位（MRR）メトリクス
-    
-    概要:
-        1位の馬が予測順位の何位に位置するかを評価する。
-        予測1位なら1.0、予測2位なら0.5、予測3位なら0.33...となる。
-    
-    計算方法:
-        - 各レースで1位馬の予測順位を特定
-        - 逆数を計算（1/予測順位）
-        - 全レースの平均を取る
-    
-    値の読み方:
-        - 0.0〜1.0の範囲
-        - 1.0に近いほど1位馬を上位に予測できている
-        - 0.5なら平均的に1位馬を2位に予測
-        - ランダム予測なら約1/馬数の値
-    """
-    
-    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None, odds: Optional[Dict[str, np.ndarray]] = None):
-        super().__init__(rankings, mask, odds)
-    
-    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, float]:
-        # 単勝確率をスコアとして使用
-        scores = probabilities['tansho']
-        num_races = scores.shape[0]
-        reciprocal_ranks = []
-        
-        for race_idx in range(num_races):
-            race_scores = scores[race_idx]
-            race_rankings = self.rankings[race_idx]
-            race_mask = self.mask[race_idx]
-            
-            # 有効な馬のみを抽出
-            valid_horses = np.where(race_mask)[0]
-            if len(valid_horses) < 2:
-                continue
-            
-            valid_scores = race_scores[valid_horses]
-            valid_rankings = race_rankings[valid_horses]
-            
-            # 無効な着順を除外
-            valid_rank_mask = valid_rankings > 0
-            if not valid_rank_mask.any():
-                continue
-            
-            final_scores = valid_scores[valid_rank_mask]
-            final_rankings = valid_rankings[valid_rank_mask]
-            
-            # 1位馬を特定
-            winner_idx = np.where(final_rankings == 1)[0]
-            if len(winner_idx) == 0:
-                continue
-            
-            winner_idx = winner_idx[0]
-            winner_score = final_scores[winner_idx]
-            
-            # 予測順位を計算（何位に予測されたか）
-            pred_rank = np.sum(final_scores > winner_score) + 1
-            reciprocal_rank = 1.0 / pred_rank
-            reciprocal_ranks.append(reciprocal_rank)
-        
-        metrics = {}
-        if reciprocal_ranks:
-            metrics['mrr'] = np.mean(reciprocal_ranks)
-            metrics['mrr_std'] = np.std(reciprocal_ranks)
-        
-        return metrics
-
-
-class RankErrorMetric(BaseMetric):
-    """
-    順位誤差メトリクス
-    
-    概要:
-        予測順位と実際の着順の差を直接測定する。
-        平均絶対誤差（MAE）と平均二乗誤差（MSE）を計算。
-    
-    計算方法:
-        - 各馬について予測順位と実際の着順の差を計算
-        - MAE = |予測順位 - 実際着順|の平均
-        - MSE = (予測順位 - 実際着順)²の平均
-        - RMSE = √MSE
-    
-    値の読み方:
-        - 0に近いほど順位予測が正確
-        - MAE=1.0なら平均1順位の誤差
-        - 完璧な予測なら全て0.0
-        - ランダム予測なら馬数に依存した値
-    """
-    
-    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None, odds: Optional[Dict[str, np.ndarray]] = None):
-        super().__init__(rankings, mask, odds)
-    
-    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, float]:
-        # 単勝確率をスコアとして使用
-        scores = probabilities['tansho']
-        num_races = scores.shape[0]
-        all_errors = []
-        
-        for race_idx in range(num_races):
-            race_scores = scores[race_idx]
-            race_rankings = self.rankings[race_idx]
-            race_mask = self.mask[race_idx]
-            
-            # 有効な馬のみを抽出
-            valid_horses = np.where(race_mask)[0]
-            if len(valid_horses) < 2:
-                continue
-            
-            valid_scores = race_scores[valid_horses]
-            valid_rankings = race_rankings[valid_horses]
-            
-            # 無効な着順を除外
-            valid_rank_mask = valid_rankings > 0
-            if valid_rank_mask.sum() < 2:
-                continue
-            
-            final_scores = valid_scores[valid_rank_mask]
-            final_rankings = valid_rankings[valid_rank_mask]
-            
-            # 予測順位を計算
-            pred_ranks = len(final_scores) + 1 - np.argsort(np.argsort(final_scores)) - 1
-            
-            # 順位誤差を計算
-            errors = np.abs(pred_ranks - final_rankings)
-            all_errors.extend(errors)
-        
-        metrics = {}
-        if all_errors:
-            all_errors = np.array(all_errors)
-            metrics['rank_mae'] = np.mean(all_errors)
-            metrics['rank_mse'] = np.mean(all_errors ** 2)
-            metrics['rank_rmse'] = np.sqrt(metrics['rank_mse'])
-            metrics['rank_std'] = np.std(all_errors)
-        
-        return metrics
-
-
-class PairwiseAccuracyMetric(BaseMetric):
-    """
-    ペアワイズ精度メトリクス
-    
-    概要:
-        全ての馬のペアについて、どちらが上位に来るかの予測精度を測定。
-        「AがBより上位」という予測が実際の着順と一致する割合を計算。
-    
-    計算方法:
-        - 各レース内の全ての馬のペア(i,j)について判定
-        - 予測: スコアi > スコアj なら馬iが上位
-        - 実際: 着順i < 着順j なら馬iが上位
-        - 一致率 = 正しく予測したペア数 / 全ペア数
-    
-    値の読み方:
-        - 0.0〜1.0の範囲
-        - 0.5はランダム予測（コイン投げと同じ）
-        - 0.7以上で良好、0.8以上で優秀な予測
-        - 順位相関よりも直感的で理解しやすい指標
-    """
-    
-    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None, odds: Optional[Dict[str, np.ndarray]] = None):
-        super().__init__(rankings, mask, odds)
-    
-    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, float]:
-        # 単勝確率をスコアとして使用
-        scores = probabilities['tansho']
-        num_races = scores.shape[0]
-        total_pairs = 0
-        correct_pairs = 0
-        
-        for race_idx in range(num_races):
-            race_scores = scores[race_idx]
-            race_rankings = self.rankings[race_idx]
-            race_mask = self.mask[race_idx]
-            
-            # 有効な馬のみを抽出
-            valid_horses = np.where(race_mask)[0]
-            if len(valid_horses) < 2:
-                continue
-            
-            valid_scores = race_scores[valid_horses]
-            valid_rankings = race_rankings[valid_horses]
-            
-            # 無効な着順を除外
-            valid_rank_mask = valid_rankings > 0
-            if valid_rank_mask.sum() < 2:
-                continue
-            
-            final_scores = valid_scores[valid_rank_mask]
-            final_rankings = valid_rankings[valid_rank_mask]
-            
-            # 全ペアについて判定
-            n_horses = len(final_scores)
-            for i in range(n_horses):
-                for j in range(i + 1, n_horses):
-                    # 予測: スコアが高い方が上位
-                    pred_i_better = final_scores[i] > final_scores[j]
-                    
-                    # 実際: 着順が小さい方が上位
-                    actual_i_better = final_rankings[i] < final_rankings[j]
-                    
-                    if pred_i_better == actual_i_better:
-                        correct_pairs += 1
-                    
-                    total_pairs += 1
-        
-        metrics = {}
-        if total_pairs > 0:
-            metrics['pairwise_accuracy'] = correct_pairs / total_pairs
+            metrics['rank_correlation'] = {
+                'spearman_corr': np.mean(spearman_corrs),
+                'summary': {
+                    'mean_correlation': np.mean(spearman_corrs),
+                    'std_correlation': np.std(spearman_corrs),
+                    'min_correlation': np.min(spearman_corrs),
+                    'max_correlation': np.max(spearman_corrs),
+                    'num_races': len(spearman_corrs)
+                }
+            }
         
         return metrics

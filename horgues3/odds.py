@@ -461,7 +461,7 @@ def restructure_odds_data(odds_data: Dict[str, pd.DataFrame],
     logger.info(f"Converting odds data for {len(race_ids)} races")
     
     num_races = len(race_ids)
-    combinations = get_betting_combinations()
+    combinations = get_betting_combinations(max_horses)
     
     # レースIDとインデックスのマッピング（一度だけ作成）
     race_id_to_idx = {race_id: idx for idx, race_id in enumerate(race_ids)}
