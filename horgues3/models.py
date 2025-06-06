@@ -412,7 +412,7 @@ class HorguesModel(nn.Module):
         self.categorical_features = {name: config['num_classes'] for name, config in dataset_params['categorical'].items()}
         self.feature_aliases = dataset_params['aliases']
 
-        self.sequences = ['horse_weight_hist']
+        self.sequences = ['horse_weight_hist', 'course_lap_time_history']
 
         # 共通のFeatureTokenizer（SoftBinning対応）
         self.tokenizer = FeatureTokenizer(

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class HorguesDataset(Dataset):
 
-    def __init__(self, start_ymd: str, end_ymd: str, max_horses: int = 18, max_hist_len: int = 18, max_prev_days: int = 1000, hours_before_race: int = 2):
+    def __init__(self, start_ymd: str, end_ymd: str, max_horses: int = 18, max_hist_len: int = 18, max_prev_days: int = 365, hours_before_race: int = 2):
         """
         Args:
             start_ymd (str): 開始日 (YYYYMMDD形式)
@@ -71,6 +71,38 @@ class HorguesDataset(Dataset):
             FROM public.horse_master_pedigree
             WHERE pedigree_index BETWEEN 0 AND 13
             GROUP BY blood_registration_number
+        ),
+        lap_time_pivot AS (
+            SELECT 
+                kaisai_year || kaisai_month_day || track_code || kaisai_kai || kaisai_day || race_number as race_id,
+                MAX(CASE WHEN lap_time_index = 0 THEN lap_time END) as lap_time_0,
+                MAX(CASE WHEN lap_time_index = 1 THEN lap_time END) as lap_time_1,
+                MAX(CASE WHEN lap_time_index = 2 THEN lap_time END) as lap_time_2,
+                MAX(CASE WHEN lap_time_index = 3 THEN lap_time END) as lap_time_3,
+                MAX(CASE WHEN lap_time_index = 4 THEN lap_time END) as lap_time_4,
+                MAX(CASE WHEN lap_time_index = 5 THEN lap_time END) as lap_time_5,
+                MAX(CASE WHEN lap_time_index = 6 THEN lap_time END) as lap_time_6,
+                MAX(CASE WHEN lap_time_index = 7 THEN lap_time END) as lap_time_7,
+                MAX(CASE WHEN lap_time_index = 8 THEN lap_time END) as lap_time_8,
+                MAX(CASE WHEN lap_time_index = 9 THEN lap_time END) as lap_time_9,
+                MAX(CASE WHEN lap_time_index = 10 THEN lap_time END) as lap_time_10,
+                MAX(CASE WHEN lap_time_index = 11 THEN lap_time END) as lap_time_11,
+                MAX(CASE WHEN lap_time_index = 12 THEN lap_time END) as lap_time_12,
+                MAX(CASE WHEN lap_time_index = 13 THEN lap_time END) as lap_time_13,
+                MAX(CASE WHEN lap_time_index = 14 THEN lap_time END) as lap_time_14,
+                MAX(CASE WHEN lap_time_index = 15 THEN lap_time END) as lap_time_15,
+                MAX(CASE WHEN lap_time_index = 16 THEN lap_time END) as lap_time_16,
+                MAX(CASE WHEN lap_time_index = 17 THEN lap_time END) as lap_time_17,
+                MAX(CASE WHEN lap_time_index = 18 THEN lap_time END) as lap_time_18,
+                MAX(CASE WHEN lap_time_index = 19 THEN lap_time END) as lap_time_19,
+                MAX(CASE WHEN lap_time_index = 20 THEN lap_time END) as lap_time_20,
+                MAX(CASE WHEN lap_time_index = 21 THEN lap_time END) as lap_time_21,
+                MAX(CASE WHEN lap_time_index = 22 THEN lap_time END) as lap_time_22,
+                MAX(CASE WHEN lap_time_index = 23 THEN lap_time END) as lap_time_23,
+                MAX(CASE WHEN lap_time_index = 24 THEN lap_time END) as lap_time_24
+            FROM public.race_detail_lap_time
+            WHERE lap_time_index BETWEEN 0 AND 24
+            GROUP BY kaisai_year, kaisai_month_day, track_code, kaisai_kai, kaisai_day, race_number
         )
         SELECT 
             hri.kaisai_year || hri.kaisai_month_day || hri.track_code || hri.kaisai_kai || hri.kaisai_day || hri.race_number as race_id_raw,
@@ -79,6 +111,7 @@ class HorguesDataset(Dataset):
             -- メタデータ
             hri.kaisai_year || hri.kaisai_month_day as kaisai_ymd_raw,
             rd.start_time as start_hm_raw,
+            hri.data_kubun as data_kubun_raw,
 
             -- 数値特徴量
             hri.horse_weight as horse_weight_raw,
@@ -90,6 +123,31 @@ class HorguesDataset(Dataset):
             hri.frame_number as frame_number_raw,
             hri.horse_age as horse_age_raw,
             hri.burden_weight as burden_weight_raw,
+            ltp.lap_time_0 as lap_time_0_raw,  -- ラップタイム
+            ltp.lap_time_1 as lap_time_1_raw,
+            ltp.lap_time_2 as lap_time_2_raw,
+            ltp.lap_time_3 as lap_time_3_raw,
+            ltp.lap_time_4 as lap_time_4_raw,
+            ltp.lap_time_5 as lap_time_5_raw,
+            ltp.lap_time_6 as lap_time_6_raw,
+            ltp.lap_time_7 as lap_time_7_raw,
+            ltp.lap_time_8 as lap_time_8_raw,
+            ltp.lap_time_9 as lap_time_9_raw,
+            ltp.lap_time_10 as lap_time_10_raw,
+            ltp.lap_time_11 as lap_time_11_raw,
+            ltp.lap_time_12 as lap_time_12_raw,
+            ltp.lap_time_13 as lap_time_13_raw,
+            ltp.lap_time_14 as lap_time_14_raw,
+            ltp.lap_time_15 as lap_time_15_raw,
+            ltp.lap_time_16 as lap_time_16_raw,
+            ltp.lap_time_17 as lap_time_17_raw,
+            ltp.lap_time_18 as lap_time_18_raw,
+            ltp.lap_time_19 as lap_time_19_raw,
+            ltp.lap_time_20 as lap_time_20_raw,
+            ltp.lap_time_21 as lap_time_21_raw,
+            ltp.lap_time_22 as lap_time_22_raw,
+            ltp.lap_time_23 as lap_time_23_raw,
+            ltp.lap_time_24 as lap_time_24_raw,
 
             -- カテゴリ特徴量
             hri.blood_registration_number as horse_id_raw,
@@ -106,9 +164,7 @@ class HorguesDataset(Dataset):
             hri.blinker_use_kubun as blinker_use_raw,
             jm.sex_code as jockey_sex_raw,
             tm.sex_code as trainer_sex_raw,
-
-            -- 血統情報
-            pp.pedigree_0 as pedigree_0_raw,
+            pp.pedigree_0 as pedigree_0_raw,  -- 3代血統情報
             pp.pedigree_1 as pedigree_1_raw,
             pp.pedigree_2 as pedigree_2_raw,
             pp.pedigree_3 as pedigree_3_raw,
@@ -122,6 +178,7 @@ class HorguesDataset(Dataset):
             pp.pedigree_11 as pedigree_11_raw,
             pp.pedigree_12 as pedigree_12_raw,
             pp.pedigree_13 as pedigree_13_raw,
+            hri.track_code as track_raw,
 
             -- ターゲット
             hri.final_order as ranking_raw
@@ -145,6 +202,9 @@ class HorguesDataset(Dataset):
         LEFT JOIN
             pedigree_pivot pp ON
             hri.blood_registration_number = pp.blood_registration_number
+        LEFT JOIN
+            lap_time_pivot ltp ON
+            hri.kaisai_year || hri.kaisai_month_day || hri.track_code || hri.kaisai_kai || hri.kaisai_day || hri.race_number = ltp.race_id
         WHERE 
             hri.horse_number BETWEEN '01' AND '{self.max_horses:02}' AND
             hri.final_order BETWEEN '01' AND '{self.max_horses:02}' AND
@@ -190,6 +250,8 @@ class HorguesDataset(Dataset):
         start_hm_mask = data['start_hm_time'].notna()
         data.loc[start_hm_mask, 'kaisai_start_datetime'] += pd.to_timedelta(data.loc[start_hm_mask, 'start_hm_time'].astype(str))
 
+        # data_kubun: data_kubun_rawをそのまま使用
+        data['data_kubun'] = data['data_kubun_raw']
 
         # ==========================================
         # 数値特徴量
@@ -237,6 +299,18 @@ class HorguesDataset(Dataset):
         burden_weight_mask = data['burden_weight_numeric'].between(0.1, 99.9)  # 負担重量は0.1倍から99.9倍の範囲
         data.loc[~burden_weight_mask, 'burden_weight_numeric'] = np.nan  # 無効な値はNaNに設定
 
+        # lap_time_{i}_numeric: ラップタイム
+        for i in range(25):
+            raw_col_name = f'lap_time_{i}_raw'
+            col_name = f'lap_time_{i}_numeric'
+            data[col_name] = pd.to_numeric(data[raw_col_name], errors='coerce').astype(np.float32) * 0.1
+            data.loc[data[col_name] == 0, col_name] = np.nan  # 0秒はNaNに設定
+        # ラップタイムを右揃えにする
+        columns = [f'lap_time_{i}_numeric' for i in range(25)]
+        data[columns] = data[columns].apply(lambda row: pd.Series(
+            np.concatenate([np.full(np.sum(np.isnan(row)), np.nan), row[~np.isnan(row)]])
+        ), axis=1)
+        
         # ==========================================
         # カテゴリ特徴量
         # ==========================================
@@ -308,6 +382,10 @@ class HorguesDataset(Dataset):
             data[col_name] = data[raw_col_name].fillna("<NULL>")
             data.loc[data[col_name] == "0000000000", col_name] = "<NULL>"  # 0000000000は無効とする
 
+        # track_valid: 競馬場コード
+        data['track_valid'] = data['track_raw'].fillna("<NULL>")
+        data.loc[data['track_valid'] == "00", 'track_valid'] = "<NULL>"
+
         # ==========================================
         # ターゲット
         # ==========================================
@@ -327,7 +405,11 @@ class HorguesDataset(Dataset):
         logger.info("Building data structure...")
 
         data = self.prepared_data
-        target_data = data[data['kaisai_ymd_date'].between(self.start_date, self.end_date)]
+
+        # 対象レースの絞込
+        target_mask = data['kaisai_ymd_date'].between(self.start_date, self.end_date)  # 期間
+        target_mask &= data['data_kubun'].isin(['2', '7'])  # 地方競馬や海外競馬は予測しない
+        target_data = data[target_mask]  
 
         # レースIDでグループ化
         race_groups = target_data.groupby('race_id')
@@ -380,6 +462,7 @@ class HorguesDataset(Dataset):
                 "pedigree_11": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
                 "pedigree_12": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
                 "pedigree_13": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
+                "track": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
             },
             "sequence_data": {
                 "horse_weight_history": {
@@ -390,6 +473,14 @@ class HorguesDataset(Dataset):
                     },
                     "x_cat": {},
                     "mask": np.zeros((num_races, self.max_horses, self.max_hist_len), dtype=bool),
+                },
+                "course_lap_time_history": {
+                    "x_num": {
+                        'days_before': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        **{f"lap_time_{i}": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32) for i in range(25)}
+                    },
+                    "x_cat": {},
+                    "mask": np.zeros((num_races, self.max_horses, self.max_hist_len), dtype=bool),
                 }
             },
             "mask": np.zeros((num_races, self.max_horses), dtype=bool),
@@ -397,11 +488,28 @@ class HorguesDataset(Dataset):
             'race_id': np.array(race_ids, dtype=object),
         }
 
-        # シーケンスデータ構築に使用するグループ（ソート済みに変更）
+        # ==========================================
+        # シーケンスデータ構築に使用するグループ
+        # ==========================================
+
+        # 馬別グループを作成
         horse_groups = {}
-        for name, group in data.groupby('horse_id_valid'):
-            # 各馬のデータを事前にソート (降順)
-            horse_groups[name] = group.sort_values('kaisai_start_datetime', ascending=False)
+        for horse_id, group in data.groupby('horse_id_valid'):
+            # 有効な馬番のみ
+            if horse_id != "<NULL>":
+                horse_groups[horse_id] = group.sort_values('kaisai_start_datetime', ascending=False)
+
+        # コース別グループを作成
+        course_groups = {}
+        for (track, track_detail, course), group in data.groupby(['track_valid', 'track_detail_valid', 'course_valid']):
+            # 有効なコースのみ (courseはNULLでも良い)
+            if track != "<NULL>" and track_detail != "<NULL>":
+                course_key = f"{track}_{track_detail}_{course}"
+                course_groups[course_key] = group.sort_values('kaisai_start_datetime', ascending=False)
+
+        # ==========================================
+        # レース毎に処理
+        # ==========================================
 
         # 進捗報告の間隔を設定
         progress_interval = min(1000, max(1, -(-num_races // 10)))  # 10%ごとに進捗報告
@@ -418,7 +526,12 @@ class HorguesDataset(Dataset):
             
             # シーケンスデータ構築のためタイムスタンプを取得（最初の行から一度だけ取得）
             current_datetime = race_data.iloc[0]['kaisai_start_datetime']
-            cutoff_datetime = current_datetime - timedelta(hours=self.hours_before_race)
+            cutoff_datetime_start = current_datetime - timedelta(days=self.max_prev_days)
+            cutoff_datetime_end = current_datetime - timedelta(hours=self.hours_before_race)
+
+            # ==========================================
+            # 馬毎に処理
+            # ==========================================
 
             for _, row in race_data.iterrows():
                 horse_idx = row['horse_number_int'] - 1  # 0-indexedに変換
@@ -466,20 +579,25 @@ class HorguesDataset(Dataset):
                 self.built_data['x_cat']['pedigree_11'][race_idx, horse_idx] = row['pedigree_11_valid']
                 self.built_data['x_cat']['pedigree_12'][race_idx, horse_idx] = row['pedigree_12_valid']
                 self.built_data['x_cat']['pedigree_13'][race_idx, horse_idx] = row['pedigree_13_valid']
+                self.built_data['x_cat']['track'][race_idx, horse_idx] = row['track_valid']
 
                 # ターゲット
                 self.built_data['rankings'][race_idx, horse_idx] = row['ranking_int']  # ranking_intを使用
 
-                # シーケンスデータ構築時に使用するキー
+                # ==========================================
+                # シーケンスデータ
+                # ==========================================
+
+                # 馬毎のシーケンスデータ構築時に使用するキー
                 horse_key = row['horse_id_valid']  
 
                 # 馬体重履歴データの構築
-                if horse_key != "<NULL>" and horse_key in horse_groups:
+                if horse_key in horse_groups:
                     history = horse_groups[horse_key]
-
-                    # 過去のデータのみフィルタ（既にソート済みなので効率的）
-                    valid_history = history[history['kaisai_start_datetime'] < cutoff_datetime].head(self.max_hist_len)  # 既にソート済みなのでheadで十分
-                    
+                    valid_history = history[
+                        (history['kaisai_start_datetime'] >= cutoff_datetime_start) & 
+                        (history['kaisai_start_datetime'] < cutoff_datetime_end)
+                    ].head(self.max_hist_len)  # 既にソート済みなのでheadで十分
                     valid_length = len(valid_history)
                     if valid_length > 0:
                         days_before = np.array([(current_datetime - hist_datetime).total_seconds() / (24 * 3600) for hist_datetime in valid_history['kaisai_start_datetime']], dtype=np.float32)
@@ -487,6 +605,27 @@ class HorguesDataset(Dataset):
                         self.built_data['sequence_data']['horse_weight_history']['x_num']['horse_weight'][race_idx, horse_idx, :valid_length] = valid_history['horse_weight_numeric'].values
                         self.built_data['sequence_data']['horse_weight_history']['x_num']['weight_change'][race_idx, horse_idx, :valid_length] = valid_history['weight_change_numeric'].values
                         self.built_data['sequence_data']['horse_weight_history']['mask'][race_idx, horse_idx, :valid_length] = True
+
+                # コース毎のシーケンスデータ構築時に使用するキー
+                course_key = f"{row['track_valid']}_{row['track_detail_valid']}_{row['course_valid']}"
+
+                # コースのラップタイム履歴データの構築
+                if course_key in course_groups:
+                    history = course_groups[course_key]
+                    valid_history = history[
+                        (history['kaisai_start_datetime'] >= cutoff_datetime_start) & 
+                        (history['kaisai_start_datetime'] < cutoff_datetime_end)
+                    ].head(self.max_hist_len)  # 既にソート済みなのでheadで十分
+                    valid_length = len(valid_history)
+                    if valid_length > 0:
+                        days_before = np.array([(current_datetime - hist_datetime).total_seconds() / (24 * 3600) for hist_datetime in valid_history['kaisai_start_datetime']], dtype=np.float32)
+                        self.built_data['sequence_data']['course_lap_time_history']['x_num']['days_before'][race_idx, horse_idx, :valid_length] = days_before
+                        for i in range(25):
+                            self.built_data['sequence_data']['course_lap_time_history']['x_num'][f'lap_time_{i}'][race_idx, horse_idx, :valid_length] = valid_history[f'lap_time_{i}_numeric'].values
+                        self.built_data['sequence_data']['course_lap_time_history']['mask'][race_idx, horse_idx, :valid_length] = True
+
+                        
+                
 
         logger.info("Data structure construction completed successfully.")
         return self
@@ -497,7 +636,7 @@ class HorguesDataset(Dataset):
             'numerical': {}, 
             'categorical': {}, 
             'aliases': {
-                # 血統情報のエイリアス（全世代統一）
+                # 血統情報のエイリアス
                 'pedigree_0': 'pedigree',
                 'pedigree_1': 'pedigree',
                 'pedigree_2': 'pedigree',
@@ -512,6 +651,8 @@ class HorguesDataset(Dataset):
                 'pedigree_11': 'pedigree',
                 'pedigree_12': 'pedigree',
                 'pedigree_13': 'pedigree',
+                # ラップタイムのエイリアス
+                **{f'lap_time_{i}': 'lap_time' for i in range(25)},
             }
         }
 

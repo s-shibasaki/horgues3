@@ -139,7 +139,7 @@ class ExpectedValueBettingMetric(BaseMetric):
         super().__init__(rankings, mask, winning_tickets, odds)
         self.bet_amount = bet_amount
         self.min_expected_value = min_expected_value
-        self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide', 'umatan']
+        self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide', 'umatan', 'sanrenfuku', 'sanrentan']
     
     def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
         if self.winning_tickets is None or self.odds is None:
@@ -238,7 +238,7 @@ class BettingCalibrationMetric(BaseMetric):
                  n_bins: int = 10):
         super().__init__(rankings, mask, winning_tickets, odds)
         self.n_bins = n_bins
-        self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide']
+        self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide', 'umatan', 'sanrenfuku', 'sanrentan']
     
     def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
         if self.winning_tickets is None:
