@@ -396,7 +396,7 @@ def extract_winning_tickets(rankings, mask=None, max_horses=18):
     return winning_tickets
 
 
-def format_betting_results(race_ids, probabilities, masks=None):
+def format_betting_results(race_ids, probabilities, masks=None, top_n=10, num_horses=18):
     """
     馬券確率の結果をフォーマットして出力（複数レース対応）
     
@@ -404,6 +404,8 @@ def format_betting_results(race_ids, probabilities, masks=None):
         race_ids: レースIDのリスト (num_races,)
         probabilities: 各種馬券の確率を格納した辞書 (num_races, num_combinations)
         masks: 有効な馬のマスク (num_races, num_horses)
+        top_n: 各馬券種の上位表示数
+        num_horses: 最大馬数（デフォルトは18）
         
     Returns:
         results: フォーマットされた結果の文字列
@@ -415,12 +417,6 @@ def format_betting_results(race_ids, probabilities, masks=None):
     
     for race_idx in range(num_races):
         race_id = race_ids[race_idx]
-        
-        # 有効馬数を計算
-        if masks is not None:
-            num_horses = int(masks[race_idx].sum())
-        else:
-            num_horses = 18  # デフォルト値
         
         results = []
         results.append(f"\n=== Race ID: {race_id} (有効馬数: {num_horses}) ===")
@@ -437,7 +433,7 @@ def format_betting_results(race_ids, probabilities, masks=None):
             sorted_indices = np.argsort(probs)[::-1]
             
             # 出力枚数を決定
-            num_output = min(10, len(sorted_indices))
+            num_output = min(top_n, len(sorted_indices))
             
             # 上位の馬券を表示
             bet_results = []
