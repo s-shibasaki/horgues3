@@ -50,6 +50,10 @@ class HorguesDataset(Dataset):
         
         engine = create_engine("postgresql://postgres:postgres@localhost/horgues3")
 
+        # ==========================================
+        # レースデータ
+        # ==========================================
+
         query = f"""
         WITH pedigree_pivot AS (
             SELECT 
@@ -215,6 +219,87 @@ class HorguesDataset(Dataset):
 
         self.fetched_data = pd.read_sql_query(query, engine)
         logger.info(f"Fetched {len(self.fetched_data)} records from the database.")
+
+        # 追加のテーブル
+        self.additional_fetched_data = {}
+
+        # ==========================================
+        # 調教データ（ウッドチップと坂路をUNIONで統合）
+        # ==========================================
+
+        training_query = f"""
+        SELECT
+            blood_registration_number as horse_id_raw,
+            training_date as training_date_raw,
+            training_time as training_time_raw,
+            training_center_kubun as training_center_raw,
+            course as course_raw,
+            track_direction as track_direction_raw,
+            furlong_10_total_time as furlong_10_total_time_raw,
+            lap_time_2000_1800 as lap_time_2000_1800_raw,
+            furlong_9_total_time as furlong_9_total_time_raw,
+            lap_time_1800_1600 as lap_time_1800_1600_raw,
+            furlong_8_total_time as furlong_8_total_time_raw,
+            lap_time_1600_1400 as lap_time_1600_1400_raw,
+            furlong_7_total_time as furlong_7_total_time_raw,
+            lap_time_1400_1200 as lap_time_1400_1200_raw,
+            furlong_6_total_time as furlong_6_total_time_raw,
+            lap_time_1200_1000 as lap_time_1200_1000_raw,
+            furlong_5_total_time as furlong_5_total_time_raw,
+            lap_time_1000_800 as lap_time_1000_800_raw,
+            furlong_4_total_time as furlong_4_total_time_raw,
+            lap_time_800_600 as lap_time_800_600_raw,
+            furlong_3_total_time as furlong_3_total_time_raw,
+            lap_time_600_400 as lap_time_600_400_raw,
+            furlong_2_total_time as furlong_2_total_time_raw,
+            lap_time_400_200 as lap_time_400_200_raw,
+            lap_time_200_0 as lap_time_200_0_raw,
+            'woodchip' as training_type_raw
+        FROM public.woodchip_training
+        WHERE 
+            (training_date > '{start_year}{start_month_day}' OR (training_date = '{start_year}{start_month_day}')) AND
+            (training_date < '{end_year}{end_month_day}' OR (training_date = '{end_year}{end_month_day}'))
+        
+        UNION ALL
+        
+        SELECT 
+            blood_registration_number as horse_id_raw,
+            training_date as training_date_raw,
+            training_time as training_time_raw,
+            training_center_kubun as training_center_raw,
+            NULL as course_raw,
+            NULL as track_direction_raw,
+            NULL as furlong_10_total_time_raw,
+            NULL as lap_time_2000_1800_raw,
+            NULL as furlong_9_total_time_raw,
+            NULL as lap_time_1800_1600_raw,
+            NULL as furlong_8_total_time_raw,
+            NULL as lap_time_1600_1400_raw,
+            NULL as furlong_7_total_time_raw,
+            NULL as lap_time_1400_1200_raw,
+            NULL as furlong_6_total_time_raw,
+            NULL as lap_time_1200_1000_raw,
+            NULL as furlong_5_total_time_raw,
+            NULL as lap_time_1000_800_raw,
+            four_furlong_total_time as furlong_4_total_time_raw,
+            lap_time_800_600 as lap_time_800_600_raw,
+            three_furlong_total_time as furlong_3_total_time_raw,
+            lap_time_600_400 as lap_time_600_400_raw,
+            two_furlong_total_time as furlong_2_total_time_raw,
+            lap_time_400_200 as lap_time_400_200_raw,
+            lap_time_200_0 as lap_time_200_0_raw,
+            'slope' as training_type_raw
+        FROM public.slope_training
+        WHERE 
+            (training_date > '{start_year}{start_month_day}' OR (training_date = '{start_year}{start_month_day}')) AND
+            (training_date < '{end_year}{end_month_day}' OR (training_date = '{end_year}{end_month_day}'))
+        
+        ORDER BY training_date_raw, training_time_raw;
+        """
+
+        self.additional_fetched_data['training'] = pd.read_sql_query(training_query, engine)
+        logger.info(f"Fetched {len(self.additional_fetched_data['training'])} training records (woodchip + slope).")
+
         return self
 
     def prepare(self):
@@ -398,6 +483,54 @@ class HorguesDataset(Dataset):
         self.prepared_data = data
         logger.info(f"Prepared data with {len(self.prepared_data)} records.")
 
+        # 追加のデータ
+        self.additional_prepared_data = {}
+
+        # ==========================================
+        # 調教データ（統合された調教データ）
+        # ==========================================
+
+        training_data = self.additional_fetched_data['training'].copy()
+
+        # horse_id_valid: 血統登録番号
+        training_data['horse_id_valid'] = training_data['horse_id_raw'].fillna("<NULL>")
+        training_data.loc[training_data['horse_id_valid'] == "0000000000", 'horse_id_valid'] = "<NULL>"
+        
+        # training_datetime: 調教日時を結合
+        training_data['training_datetime'] = pd.to_datetime(training_data['training_date_raw'] + ' ' + training_data['training_time_raw'], format='%Y%m%d %H%M', errors='coerce')
+
+        # カテゴリ特徴量
+        training_data['training_center_valid'] = training_data['training_center_raw'].fillna("<NULL>")  # 0も使用
+        training_data['course_valid'] = training_data['course_raw'].fillna("<NULL>")  # 0も使用
+        training_data['track_direction_valid'] = training_data['track_direction_raw'].fillna("<NULL>")  # 0も使用
+        training_data['training_type_valid'] = training_data['training_type_raw']
+
+        # 数値特徴量（時間データを秒に変換）
+        time_columns = [
+            'furlong_10_total_time', 'furlong_9_total_time', 'furlong_8_total_time', 'furlong_7_total_time',
+            'furlong_6_total_time', 'furlong_5_total_time', 'furlong_4_total_time', 'furlong_3_total_time', 'furlong_2_total_time'
+        ]
+        lap_time_columns = [
+            'lap_time_2000_1800', 'lap_time_1800_1600', 'lap_time_1600_1400', 'lap_time_1400_1200',
+            'lap_time_1200_1000', 'lap_time_1000_800', 'lap_time_800_600', 'lap_time_600_400',
+            'lap_time_400_200', 'lap_time_200_0'
+        ]
+        
+        for col in time_columns:
+            raw_col = f'{col}_raw'
+            numeric_col = f'{col}_numeric'
+            training_data[numeric_col] = pd.to_numeric(training_data[raw_col], errors='coerce').astype(np.float32) * 0.1
+            training_data.loc[training_data[numeric_col] == 0, numeric_col] = np.nan
+        
+        for col in lap_time_columns:
+            raw_col = f'{col}_raw'
+            numeric_col = f'{col}_numeric'
+            training_data[numeric_col] = pd.to_numeric(training_data[raw_col], errors='coerce').astype(np.float32) * 0.1
+            training_data.loc[training_data[numeric_col] == 0, numeric_col] = np.nan
+        
+        self.additional_prepared_data['training'] = training_data
+        logger.info(f"Prepared {len(self.additional_prepared_data['training'])} training records.")
+
         return self
 
     def build(self):
@@ -481,6 +614,38 @@ class HorguesDataset(Dataset):
                     },
                     "x_cat": {},
                     "mask": np.zeros((num_races, self.max_horses, self.max_hist_len), dtype=bool),
+                },
+                "training_history": {
+                    "x_num": {
+                        'days_before': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        # ウッドチップ調教用
+                        'furlong_10_total_time': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'furlong_9_total_time': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'furlong_8_total_time': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'furlong_7_total_time': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'furlong_6_total_time': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'furlong_5_total_time': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'furlong_4_total_time': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'furlong_3_total_time': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'furlong_2_total_time': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'lap_time_2000_1800': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'lap_time_1800_1600': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'lap_time_1600_1400': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'lap_time_1400_1200': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'lap_time_1200_1000': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'lap_time_1000_800': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'lap_time_800_600': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'lap_time_600_400': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'lap_time_400_200': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        'lap_time_200_0': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                    },
+                    "x_cat": {
+                        'training_center': np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        'training_type': np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        'course': np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        'track_direction': np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                    },
+                    "mask": np.zeros((num_races, self.max_horses, self.max_hist_len), dtype=bool),
                 }
             },
             "mask": np.zeros((num_races, self.max_horses), dtype=bool),
@@ -506,6 +671,14 @@ class HorguesDataset(Dataset):
             if track != "<NULL>" and track_detail != "<NULL>":
                 course_key = f"{track}_{track_detail}_{course}"
                 course_groups[course_key] = group.sort_values('kaisai_start_datetime', ascending=False)
+
+        # 馬別グループの作成 (調教データ)
+        training_horse_groups = {}
+        training_data = self.additional_prepared_data['training']
+        for horse_id, group in training_data.groupby('horse_id_valid'):
+            # 有効な馬番のみ
+            if horse_id != "<NULL>":
+                training_horse_groups[horse_id] = group.sort_values('training_datetime', ascending=False)
 
         # ==========================================
         # レース毎に処理
@@ -624,7 +797,44 @@ class HorguesDataset(Dataset):
                             self.built_data['sequence_data']['course_lap_time_history']['x_num'][f'lap_time_{i}'][race_idx, horse_idx, :valid_length] = valid_history[f'lap_time_{i}_numeric'].values
                         self.built_data['sequence_data']['course_lap_time_history']['mask'][race_idx, horse_idx, :valid_length] = True
 
+                # 調教履歴データの構築
+                if horse_key in training_horse_groups:
+                    training_history = training_horse_groups[horse_key]
+                    valid_training_history = training_history[
+                        (training_history['training_datetime'] >= cutoff_datetime_start) & 
+                        (training_history['training_datetime'] < cutoff_datetime_end)
+                    ].head(self.max_hist_len)  # 既にソート済みなのでheadで十分
+                    valid_length = len(valid_training_history)
+                    if valid_length > 0:
+                        days_before = np.array([(current_datetime - hist_datetime).total_seconds() / (24 * 3600) for hist_datetime in valid_training_history['training_datetime']], dtype=np.float32)
+                        self.built_data['sequence_data']['training_history']['x_num']['days_before'][race_idx, horse_idx, :valid_length] = days_before
                         
+                        # 数値特徴量（時間データ）
+                        time_features = [
+                            'furlong_10_total_time', 'furlong_9_total_time', 'furlong_8_total_time', 'furlong_7_total_time',
+                            'furlong_6_total_time', 'furlong_5_total_time', 'furlong_4_total_time', 'furlong_3_total_time', 'furlong_2_total_time'
+                        ]
+                        lap_time_features = [
+                            'lap_time_2000_1800', 'lap_time_1800_1600', 'lap_time_1600_1400', 'lap_time_1400_1200',
+                            'lap_time_1200_1000', 'lap_time_1000_800', 'lap_time_800_600', 'lap_time_600_400',
+                            'lap_time_400_200', 'lap_time_200_0'
+                        ]
+                        
+                        for feature in time_features:
+                            feature_col = f'{feature}_numeric'
+                            self.built_data['sequence_data']['training_history']['x_num'][feature][race_idx, horse_idx, :valid_length] = valid_training_history[feature_col].values
+                        
+                        for feature in lap_time_features:
+                            feature_col = f'{feature}_numeric'
+                            self.built_data['sequence_data']['training_history']['x_num'][feature][race_idx, horse_idx, :valid_length] = valid_training_history[feature_col].values
+                        
+                        # カテゴリ特徴量
+                        self.built_data['sequence_data']['training_history']['x_cat']['training_center'][race_idx, horse_idx, :valid_length] = valid_training_history['training_center_valid'].values
+                        self.built_data['sequence_data']['training_history']['x_cat']['training_type'][race_idx, horse_idx, :valid_length] = valid_training_history['training_type_valid'].values
+                        self.built_data['sequence_data']['training_history']['x_cat']['course'][race_idx, horse_idx, :valid_length] = valid_training_history['course_valid'].values
+                        self.built_data['sequence_data']['training_history']['x_cat']['track_direction'][race_idx, horse_idx, :valid_length] = valid_training_history['track_direction_valid'].values
+                        
+                        self.built_data['sequence_data']['training_history']['mask'][race_idx, horse_idx, :valid_length] = True
                 
 
         logger.info("Data structure construction completed successfully.")
@@ -653,6 +863,27 @@ class HorguesDataset(Dataset):
                 'pedigree_13': 'pedigree',
                 # ラップタイムのエイリアス
                 **{f'lap_time_{i}': 'lap_time' for i in range(25)},
+                # 調教タイムのエイリアス
+                'furlong_10_total_time': 'furlong_total_time',
+                'furlong_9_total_time': 'furlong_total_time',
+                'furlong_8_total_time': 'furlong_total_time',
+                'furlong_7_total_time': 'furlong_total_time',
+                'furlong_6_total_time': 'furlong_total_time',
+                'furlong_5_total_time': 'furlong_total_time',
+                'furlong_4_total_time': 'furlong_total_time',
+                'furlong_3_total_time': 'furlong_total_time',
+                'furlong_2_total_time': 'furlong_total_time',
+                # 調教ラップタイムのエイリアス
+                'lap_time_2000_1800': 'training_lap_time',
+                'lap_time_1800_1600': 'training_lap_time',
+                'lap_time_1600_1400': 'training_lap_time',
+                'lap_time_1400_1200': 'training_lap_time',
+                'lap_time_1200_1000': 'training_lap_time',
+                'lap_time_1000_800': 'training_lap_time',
+                'lap_time_800_600': 'training_lap_time',
+                'lap_time_600_400': 'training_lap_time',
+                'lap_time_400_200': 'training_lap_time',
+                'lap_time_200_0': 'training_lap_time',
             }
         }
 
