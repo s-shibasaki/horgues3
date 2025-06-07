@@ -301,7 +301,7 @@ class KellyCriterionBettingMetric(BaseMetric):
         valid_mask = (probs > threshold) & np.isfinite(odds) & (odds > 1.0)
         
         if not valid_mask.any():
-            return self._empty_result()
+            return None
         
         # ケリー基準による投資比率計算
         kelly_fractions = self._calculate_kelly_fractions(probs, odds)
@@ -310,38 +310,41 @@ class KellyCriterionBettingMetric(BaseMetric):
         bet_mask = valid_mask & (kelly_fractions > 0)
         
         if not bet_mask.any():
-            return self._empty_result()
+            return None
         
         # 投資額計算
         bet_amounts = kelly_fractions * self.bankroll
         total_bet = np.sum(bet_amounts[bet_mask])
-        
+
         # 払戻計算
         payouts = bet_amounts * odds * winning_tickets
         total_payout = np.sum(payouts[bet_mask])
-        
-        # レース単位の統計
-        race_bets = np.any(bet_mask.reshape(-1, bet_mask.shape[-1]), axis=1)
-        bet_races = np.sum(race_bets)
-        total_races = len(race_bets)
+
+        # 利益
+        total_profit = total_payout - total_bet
+
+        # 馬券単位の的中率
+        bet_count = np.sum(bet_mask)
+        hit_count = np.sum(winning_tickets[bet_mask])
+        hit_rate = hit_count / bet_count if bet_count > 0 else 0.0
+
+        # レース単位の的中率
+        race_bet_count = np.sum(np.any(bet_mask.reshape(-1, probs.shape[1]), axis=1))
+        race_hit_count = np.sum(winning_tickets[bet_mask.reshape(-1, probs.shape[1])])
+        race_hit_rate = race_hit_count / race_bet_count if race_bet_count > 0 else 0.0
+
+        # 回収率とスコア
+        recovery_rate = total_payout / total_bet if total_bet > 0 else 0.0
+        score = race_hit_rate * total_profit
         
         return {
-            'recovery_rate': total_payout / total_bet if total_bet > 0 else 0.0,
-            'profit_rate': (total_payout - total_bet) / total_bet if total_bet > 0 else 0.0,
-            'net_profit': total_payout - total_bet,
-            'bet_frequency': bet_races / total_races if total_races > 0 else 0.0,
-            'bet_races': bet_races,
-            'total_races': total_races,
             'total_bet': total_bet,
-            'total_payout': total_payout
-        }
-    
-    def _empty_result(self) -> Dict[str, float]:
-        """空の結果を返す"""
-        return {
-            'recovery_rate': 0.0, 'profit_rate': 0.0, 'net_profit': 0.0,
-            'bet_frequency': 0.0, 'bet_races': 0, 'total_races': 0,
-            'total_bet': 0.0, 'total_payout': 0.0
+            'total_payout': total_payout,
+            'total_profit': total_profit,
+            'hit_rate': hit_rate,
+            'race_hit_rate': race_hit_rate,
+            'recovery_rate': recovery_rate,
+            'score': score,
         }
     
     def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
@@ -360,8 +363,8 @@ class KellyCriterionBettingMetric(BaseMetric):
                 self.winning_tickets[bet_type],
                 self.odds[bet_type]
             )
-            
-            if result['total_races'] > 0:
+
+            if result is not None:
                 metrics['kelly_betting'][bet_type] = result
         
         return metrics
@@ -403,35 +406,24 @@ class AdaptiveKellyCriterionBettingMetric(KellyCriterionBettingMetric):
         min_thresh, max_thresh = self.threshold_ranges[bet_type]
         thresholds = np.linspace(min_thresh, max_thresh, self.threshold_points)
         
-        # データ分割（前半で調整、後半で検証）
-        split_idx = len(probs) // 2
-        train_data = (probs[:split_idx], winning_tickets[:split_idx], odds[:split_idx])
-        valid_data = (probs[split_idx:], winning_tickets[split_idx:], odds[split_idx:])
-        
         # 各閾値で評価
         best_threshold = min_thresh
         best_score = -float('inf')
         results = []
         
         for threshold in thresholds:
-            result = self._evaluate_betting_strategy(*train_data, threshold)
+            result = self._evaluate_betting_strategy(probs, winning_tickets, odds, threshold)
             
-            # スコア = 利益率 - リスクペナルティ
-            score = result['profit_rate'] - 0.1 * abs(result['profit_rate'])
-            results.append({'threshold': threshold, 'score': score, **result})
+            if result is None:
+                continue
+
+            results.append({'threshold': threshold, **result})
             
-            if score > best_score:
-                best_score = score
+            if result['score'] > best_score:
+                best_score = result['score']
                 best_threshold = threshold
         
-        # 検証データで最終評価
-        validation_result = self._evaluate_betting_strategy(*valid_data, best_threshold)
-        
-        return best_threshold, {
-            'tuning_results': results,
-            'validation_result': validation_result,
-            'best_score': best_score
-        }
+        return best_threshold, best_score
     
     def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
         if self.winning_tickets is None or self.odds is None:
@@ -447,22 +439,27 @@ class AdaptiveKellyCriterionBettingMetric(KellyCriterionBettingMetric):
             probs = probabilities[bet_type]
             winning = self.winning_tickets[bet_type]
             odds_data = self.odds[bet_type]
+
+            # データ分割（前半で調整、後半で検証）
+            split_idx = len(probs) // 2
+            train_data = (probs[:split_idx], winning[:split_idx], odds_data[:split_idx])
+            valid_data = (probs[split_idx:], winning[split_idx:], odds_data[split_idx:])
             
             # 最適閾値探索
-            optimal_threshold, analysis = self._find_optimal_threshold(
-                probs, winning, odds_data, bet_type
+            optimal_threshold, best_score = self._find_optimal_threshold(
+                *train_data, bet_type
             )
             
-            # 全データで最終評価
-            final_result = self._evaluate_betting_strategy(
-                probs, winning, odds_data, optimal_threshold
+            # 検証データで最終評価
+            validation_result = self._evaluate_betting_strategy(
+                *valid_data, optimal_threshold
             )
-            
-            if final_result['total_races'] > 0:
+
+            if validation_result is not None:
                 metrics['adaptive_kelly_betting'][bet_type] = {
                     'optimal_threshold': optimal_threshold,
-                    'threshold_analysis': analysis,
-                    **final_result
+                    'best_score': best_score,
+                    **validation_result
                 }
         
         return metrics
