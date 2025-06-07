@@ -922,7 +922,7 @@ class HorguesDataset(Dataset):
             """数値特徴量の標準化を行う内部メソッド"""
             transformed = {}
             for name, values in data.items():
-                alias = self.params.get('aliases', {}).get(name, name)
+                alias = self.feature_aliases.get(name, name)
                 mean = feature_params[alias]['mean']
                 std = feature_params[alias]['std']
                 # 標準化（stdが0の場合は0で埋める）
@@ -936,7 +936,7 @@ class HorguesDataset(Dataset):
             """カテゴリ特徴量のエンコーディングを行う内部メソッド"""
             transformed = {}
             for name, values in data.items():
-                alias = self.params.get('aliases', {}).get(name, name)
+                alias = self.feature_aliases.get(name, name)
                 encoder = feature_params[alias]['encoder']
                 # エンコーディング（未知の値は<NULL>として扱う）
                 encoded_values = np.array([encoder.get(str(val), encoder["<NULL>"]) for val in values.flatten()])
