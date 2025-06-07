@@ -110,115 +110,6 @@ class BettingAccuracyMetric(BaseMetric):
         return metrics
 
 
-class ExpectedValueBettingMetric(BaseMetric):
-    """
-    期待値ベース投資戦略メトリクス
-    
-    概要:
-        期待値が1.0を超える馬券のみを購入する戦略での収益性を評価します。
-        期待値 = 予測確率 × オッズ が1.0を超える場合のみ投資し、
-        長期的な収益性を測定します。
-    
-    使い道:
-        - 期待値理論に基づく投資戦略の評価
-        - 長期的な収益安定性の確認
-        - リスク管理された投資手法の検証
-        - 予測精度とオッズのバランス評価
-        
-    出力メトリクス:
-        - recovery_rate: 回収率（払戻金/投資金額）
-        - profit_rate: 利益率（(払戻金-投資金額)/投資金額）
-        - bet_frequency: 投資頻度（期待値>1.0のレース割合）
-        - avg_expected_value: 投資時の平均期待値
-    """
-    
-    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None,
-                 winning_tickets: Optional[Dict[str, np.ndarray]] = None,
-                 odds: Optional[Dict[str, np.ndarray]] = None,
-                 bet_amount: float = 100.0, min_expected_value: float = 1.05):
-        super().__init__(rankings, mask, winning_tickets, odds)
-        self.bet_amount = bet_amount
-        self.min_expected_value = min_expected_value
-        self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide', 'umatan', 'sanrenfuku', 'sanrentan']
-    
-    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
-        if self.winning_tickets is None or self.odds is None:
-            return {}
-        
-        metrics = {'expected_value_betting': {}}
-        
-        for bet_type in self.bet_types:
-            if (bet_type not in probabilities or 
-                bet_type not in self.winning_tickets or 
-                bet_type not in self.odds):
-                continue
-            
-            pred_probs = probabilities[bet_type]
-            winning_tickets = self.winning_tickets[bet_type]
-            odds_data = self.odds[bet_type]
-            num_races = pred_probs.shape[0]
-            
-            total_bet = 0.0
-            total_payout = 0.0
-            bet_count = 0
-            total_races = 0
-            expected_values = []
-            
-            for race_idx in range(num_races):
-                race_probs = pred_probs[race_idx]
-                race_winning = winning_tickets[race_idx]
-                race_odds = odds_data[race_idx]
-                
-                valid_combos = (race_probs > 0) & ~np.isnan(race_odds) & (race_odds > 0)
-                if not valid_combos.any():
-                    continue
-                
-                total_races += 1
-                
-                # 期待値計算
-                expected_values_race = race_probs * race_odds
-                valid_expected_values = expected_values_race[valid_combos]
-                
-                # 期待値が閾値を超える組み合わせを探す
-                best_combo_idx = None
-                best_expected_value = 0
-                
-                for combo_idx in np.where(valid_combos)[0]:
-                    ev = expected_values_race[combo_idx]
-                    if ev >= self.min_expected_value and ev > best_expected_value:
-                        best_expected_value = ev
-                        best_combo_idx = combo_idx
-                
-                if best_combo_idx is not None:
-                    bet_count += 1
-                    total_bet += self.bet_amount
-                    expected_values.append(best_expected_value)
-                    
-                    if race_winning[best_combo_idx]:
-                        payout = self.bet_amount * race_odds[best_combo_idx]
-                        total_payout += payout
-            
-            bet_metrics = {}
-            if total_bet > 0:
-                bet_metrics['recovery_rate'] = total_payout / total_bet
-                bet_metrics['profit_rate'] = (total_payout - total_bet) / total_bet
-                bet_metrics['bet_frequency'] = bet_count / total_races if total_races > 0 else 0
-                bet_metrics['avg_expected_value'] = np.mean(expected_values) if expected_values else 0
-                
-                bet_metrics['summary'] = {
-                    'total_bet': total_bet,
-                    'total_payout': total_payout,
-                    'net_profit': total_payout - total_bet,
-                    'bet_count': bet_count,
-                    'total_races': total_races,
-                    'min_ev_threshold': self.min_expected_value
-                }
-            
-            metrics['expected_value_betting'][bet_type] = bet_metrics
-        
-        return metrics
-
-
 class BettingCalibrationMetric(BaseMetric):
     """
     予測確率較正メトリクス
@@ -357,3 +248,222 @@ class RankCorrelationMetric(BaseMetric):
             }
         
         return metrics
+
+
+class KellyCriterionBettingMetric(BaseMetric):
+    """
+    ケリー基準ベース投資戦略メトリクス
+    
+    概要:
+        ケリー基準を使用して最適投資額を決定し、収益性を評価します。
+        
+    出力メトリクス:
+        - recovery_rate: 回収率
+        - profit_rate: 利益率
+        - bet_frequency: 投資頻度
+    """
+    
+    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None,
+                 winning_tickets: Optional[Dict[str, np.ndarray]] = None,
+                 odds: Optional[Dict[str, np.ndarray]] = None,
+                 bankroll: float = 10000.0, max_bet_fraction: float = 0.25,
+                 min_kelly_fraction: float = 0.01):
+        super().__init__(rankings, mask, winning_tickets, odds)
+        self.bankroll = bankroll
+        self.max_bet_fraction = max_bet_fraction
+        self.min_kelly_fraction = min_kelly_fraction
+        self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide', 'umatan', 'sanrenfuku', 'sanrentan']
+    
+    def _calculate_kelly_fractions(self, probs: np.ndarray, odds: np.ndarray) -> np.ndarray:
+        """ケリー基準による投資比率をベクトル計算"""
+        # 期待値チェック（prob * odds > 1）
+        expected_values = probs * odds
+        profitable = expected_values > 1.0
+        
+        # ケリー基準: f* = (prob * odds - 1) / (odds - 1)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            kelly_fractions = (expected_values - 1) / (odds - 1)
+        
+        # 条件に合わないものを0にセット
+        kelly_fractions = np.where(
+            profitable & (kelly_fractions >= self.min_kelly_fraction) & 
+            np.isfinite(kelly_fractions),
+            np.minimum(kelly_fractions, self.max_bet_fraction),
+            0.0
+        )
+        
+        return kelly_fractions
+    
+    def _evaluate_betting_strategy(self, probs: np.ndarray, winning_tickets: np.ndarray, 
+                                  odds: np.ndarray, threshold: float = 0.0) -> Dict[str, float]:
+        """投資戦略を評価"""
+        # 有効なデータのマスク
+        valid_mask = (probs > threshold) & np.isfinite(odds) & (odds > 1.0)
+        
+        if not valid_mask.any():
+            return self._empty_result()
+        
+        # ケリー基準による投資比率計算
+        kelly_fractions = self._calculate_kelly_fractions(probs, odds)
+        
+        # 投資対象のマスク（閾値とケリー基準を満たす）
+        bet_mask = valid_mask & (kelly_fractions > 0)
+        
+        if not bet_mask.any():
+            return self._empty_result()
+        
+        # 投資額計算
+        bet_amounts = kelly_fractions * self.bankroll
+        total_bet = np.sum(bet_amounts[bet_mask])
+        
+        # 払戻計算
+        payouts = bet_amounts * odds * winning_tickets
+        total_payout = np.sum(payouts[bet_mask])
+        
+        # レース単位の統計
+        race_bets = np.any(bet_mask.reshape(-1, bet_mask.shape[-1]), axis=1)
+        bet_races = np.sum(race_bets)
+        total_races = len(race_bets)
+        
+        return {
+            'recovery_rate': total_payout / total_bet if total_bet > 0 else 0.0,
+            'profit_rate': (total_payout - total_bet) / total_bet if total_bet > 0 else 0.0,
+            'net_profit': total_payout - total_bet,
+            'bet_frequency': bet_races / total_races if total_races > 0 else 0.0,
+            'bet_races': bet_races,
+            'total_races': total_races,
+            'total_bet': total_bet,
+            'total_payout': total_payout
+        }
+    
+    def _empty_result(self) -> Dict[str, float]:
+        """空の結果を返す"""
+        return {
+            'recovery_rate': 0.0, 'profit_rate': 0.0, 'net_profit': 0.0,
+            'bet_frequency': 0.0, 'bet_races': 0, 'total_races': 0,
+            'total_bet': 0.0, 'total_payout': 0.0
+        }
+    
+    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
+        if self.winning_tickets is None or self.odds is None:
+            return {}
+        
+        metrics = {'kelly_betting': {}}
+        
+        for bet_type in self.bet_types:
+            if not all(key in data for key in [bet_type] 
+                      for data in [probabilities, self.winning_tickets, self.odds]):
+                continue
+            
+            result = self._evaluate_betting_strategy(
+                probabilities[bet_type],
+                self.winning_tickets[bet_type],
+                self.odds[bet_type]
+            )
+            
+            if result['total_races'] > 0:
+                metrics['kelly_betting'][bet_type] = result
+        
+        return metrics
+
+
+class AdaptiveKellyCriterionBettingMetric(KellyCriterionBettingMetric):
+    """
+    適応的ケリー基準ベース投資戦略メトリクス
+    
+    概要:
+        確率閾値を適応的に調整してリスクを管理する投資戦略を評価します。
+        
+    出力メトリクス:
+        - 基本ケリー基準メトリクス + optimal_threshold
+    """
+    
+    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None,
+                 winning_tickets: Optional[Dict[str, np.ndarray]] = None,
+                 odds: Optional[Dict[str, np.ndarray]] = None,
+                 bankroll: float = 10000.0, max_bet_fraction: float = 0.25,
+                 min_kelly_fraction: float = 0.01, threshold_points: int = 10):
+        super().__init__(rankings, mask, winning_tickets, odds, bankroll, 
+                        max_bet_fraction, min_kelly_fraction)
+        self.threshold_points = threshold_points
+        
+        # 馬券種別ごとの閾値範囲
+        self.threshold_ranges = {
+            'tansho': (0.05, 0.3), 'fukusho': (0.1, 0.5), 'umaren': (0.02, 0.15),
+            'wide': (0.05, 0.25), 'umatan': (0.01, 0.08), 'sanrenfuku': (0.005, 0.05),
+            'sanrentan': (0.002, 0.02)
+        }
+    
+    def _find_optimal_threshold(self, probs: np.ndarray, winning_tickets: np.ndarray, 
+                               odds: np.ndarray, bet_type: str) -> Tuple[float, Dict[str, Any]]:
+        """最適閾値を探索"""
+        if bet_type not in self.threshold_ranges or len(probs) < 20:
+            return 0.0, {}
+        
+        min_thresh, max_thresh = self.threshold_ranges[bet_type]
+        thresholds = np.linspace(min_thresh, max_thresh, self.threshold_points)
+        
+        # データ分割（前半で調整、後半で検証）
+        split_idx = len(probs) // 2
+        train_data = (probs[:split_idx], winning_tickets[:split_idx], odds[:split_idx])
+        valid_data = (probs[split_idx:], winning_tickets[split_idx:], odds[split_idx:])
+        
+        # 各閾値で評価
+        best_threshold = min_thresh
+        best_score = -float('inf')
+        results = []
+        
+        for threshold in thresholds:
+            result = self._evaluate_betting_strategy(*train_data, threshold)
+            
+            # スコア = 利益率 - リスクペナルティ
+            score = result['profit_rate'] - 0.1 * abs(result['profit_rate'])
+            results.append({'threshold': threshold, 'score': score, **result})
+            
+            if score > best_score:
+                best_score = score
+                best_threshold = threshold
+        
+        # 検証データで最終評価
+        validation_result = self._evaluate_betting_strategy(*valid_data, best_threshold)
+        
+        return best_threshold, {
+            'tuning_results': results,
+            'validation_result': validation_result,
+            'best_score': best_score
+        }
+    
+    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
+        if self.winning_tickets is None or self.odds is None:
+            return {}
+        
+        metrics = {'adaptive_kelly_betting': {}}
+        
+        for bet_type in self.bet_types:
+            if not all(key in data for key in [bet_type] 
+                      for data in [probabilities, self.winning_tickets, self.odds]):
+                continue
+            
+            probs = probabilities[bet_type]
+            winning = self.winning_tickets[bet_type]
+            odds_data = self.odds[bet_type]
+            
+            # 最適閾値探索
+            optimal_threshold, analysis = self._find_optimal_threshold(
+                probs, winning, odds_data, bet_type
+            )
+            
+            # 全データで最終評価
+            final_result = self._evaluate_betting_strategy(
+                probs, winning, odds_data, optimal_threshold
+            )
+            
+            if final_result['total_races'] > 0:
+                metrics['adaptive_kelly_betting'][bet_type] = {
+                    'optimal_threshold': optimal_threshold,
+                    'threshold_analysis': analysis,
+                    **final_result
+                }
+        
+        return metrics
+
