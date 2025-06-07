@@ -37,6 +37,47 @@ class HorguesDataset(Dataset):
         self.max_prev_days = max_prev_days
         self.hours_before_race = hours_before_race
 
+        self.feature_aliases = {
+            # 血統情報のエイリアス
+            'pedigree_0': 'pedigree',
+            'pedigree_1': 'pedigree',
+            'pedigree_2': 'pedigree',
+            'pedigree_3': 'pedigree',
+            'pedigree_4': 'pedigree',
+            'pedigree_5': 'pedigree',
+            'pedigree_6': 'pedigree',
+            'pedigree_7': 'pedigree',
+            'pedigree_8': 'pedigree',
+            'pedigree_9': 'pedigree',
+            'pedigree_10': 'pedigree',
+            'pedigree_11': 'pedigree',
+            'pedigree_12': 'pedigree',
+            'pedigree_13': 'pedigree',
+            # ラップタイムのエイリアス
+            **{f'lap_time_{i}': 'lap_time' for i in range(25)},
+            # 調教タイムのエイリアス
+            'furlong_10_total_time': 'furlong_total_time',
+            'furlong_9_total_time': 'furlong_total_time',
+            'furlong_8_total_time': 'furlong_total_time',
+            'furlong_7_total_time': 'furlong_total_time',
+            'furlong_6_total_time': 'furlong_total_time',
+            'furlong_5_total_time': 'furlong_total_time',
+            'furlong_4_total_time': 'furlong_total_time',
+            'furlong_3_total_time': 'furlong_total_time',
+            'furlong_2_total_time': 'furlong_total_time',
+            # 調教ラップタイムのエイリアス
+            'lap_time_2000_1800': 'training_lap_time',
+            'lap_time_1800_1600': 'training_lap_time',
+            'lap_time_1600_1400': 'training_lap_time',
+            'lap_time_1400_1200': 'training_lap_time',
+            'lap_time_1200_1000': 'training_lap_time',
+            'lap_time_1000_800': 'training_lap_time',
+            'lap_time_800_600': 'training_lap_time',
+            'lap_time_600_400': 'training_lap_time',
+            'lap_time_400_200': 'training_lap_time',
+            'lap_time_200_0': 'training_lap_time',
+        }
+
     def fetch(self):
         """ データベースからデータを取得する"""
         logger.info("Fetching data from database...")
@@ -210,8 +251,6 @@ class HorguesDataset(Dataset):
             lap_time_pivot ltp ON
             hri.kaisai_year || hri.kaisai_month_day || hri.track_code || hri.kaisai_kai || hri.kaisai_day || hri.race_number = ltp.race_id
         WHERE 
-            hri.horse_number BETWEEN '01' AND '{self.max_horses:02}' AND
-            hri.final_order BETWEEN '01' AND '{self.max_horses:02}' AND
             (hri.kaisai_year > '{start_year}' OR (hri.kaisai_year = '{start_year}' AND hri.kaisai_month_day >= '{start_month_day}')) AND
             (hri.kaisai_year < '{end_year}' OR (hri.kaisai_year = '{end_year}' AND hri.kaisai_month_day <= '{end_month_day}'))
         ORDER BY hri.kaisai_year, hri.kaisai_month_day, hri.track_code, hri.kaisai_kai, hri.kaisai_day, hri.horse_number;
@@ -537,19 +576,24 @@ class HorguesDataset(Dataset):
         """データ構造を構築する"""
         logger.info("Building data structure...")
 
-        data = self.prepared_data
+        data = self.prepared_data.copy()
 
-        # 対象レースの絞込
+        # 予測対象データの絞込
         target_mask = data['kaisai_ymd_date'].between(self.start_date, self.end_date)  # 期間
         target_mask &= data['data_kubun'].isin(['2', '7'])  # 地方競馬や海外競馬は予測しない
-        target_data = data[target_mask]  
+        target_mask &= (data['horse_number_int'] >= 1) & (data['horse_number_int'] <= self.max_horses)
+        target_mask &= (data['ranking_int'] >= 1) & (data['ranking_int'] <= self.max_horses)
+        target_data = data[target_mask].copy()
 
-        # レースIDでグループ化
-        race_groups = target_data.groupby('race_id')
-
-        # レース一覧を取得 (レースID順にソート)
-        race_ids = sorted(race_groups.groups.keys())
+        # レース情報を事前計算
+        race_info = target_data.groupby('race_id').first()
+        race_ids = sorted(race_info.index)
         num_races = len(race_ids)
+
+        # 高速化のための事前処理
+        # レースIDと馬番をマルチインデックスに変換
+        target_data['race_idx'] = target_data['race_id'].map({race_id: idx for idx, race_id in enumerate(race_ids)})
+        target_data['horse_idx'] = target_data['horse_number_int'] - 1
 
         logger.info(f"Building data for {num_races} races...")
 
@@ -618,7 +662,6 @@ class HorguesDataset(Dataset):
                 "training_history": {
                     "x_num": {
                         'days_before': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
-                        # ウッドチップ調教用
                         'furlong_10_total_time': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                         'furlong_9_total_time': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                         'furlong_8_total_time': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
@@ -654,253 +697,187 @@ class HorguesDataset(Dataset):
         }
 
         # ==========================================
-        # シーケンスデータ構築に使用するグループ
+        # 非シーケンスデータ部分
+        # ==========================================
+        
+        # Numpyのインデックシング用
+        race_indices = target_data['race_idx'].values
+        horse_indices = target_data['horse_idx'].values
+
+        # 数値特徴量の設定
+        self.built_data['x_num']['horse_weight'][race_indices, horse_indices] = target_data['horse_weight_numeric'].values
+        self.built_data['x_num']['weight_change'][race_indices, horse_indices] = target_data['weight_change_numeric'].values
+        self.built_data['x_num']['distance'][race_indices, horse_indices] = target_data['distance_numeric'].values
+        self.built_data['x_num']['race_number'][race_indices, horse_indices] = target_data['race_number_numeric'].values
+        self.built_data['x_num']['registration_count'][race_indices, horse_indices] = target_data['registration_count_numeric'].values
+        self.built_data['x_num']['horse_number'][race_indices, horse_indices] = target_data['horse_number_numeric'].values
+        self.built_data['x_num']['frame_number'][race_indices, horse_indices] = target_data['frame_number_numeric'].values
+        self.built_data['x_num']['horse_age'][race_indices, horse_indices] = target_data['horse_age_numeric'].values
+        self.built_data['x_num']['burden_weight'][race_indices, horse_indices] = target_data['burden_weight_numeric'].values
+        
+        # カテゴリ特徴量の設定
+        self.built_data['x_cat']['horse_id'][race_indices, horse_indices] = target_data['horse_id_valid'].values
+        self.built_data['x_cat']['jockey_id'][race_indices, horse_indices] = target_data['jockey_id_valid'].values
+        self.built_data['x_cat']['track_detail'][race_indices, horse_indices] = target_data['track_detail_valid'].values
+        self.built_data['x_cat']['track_type'][race_indices, horse_indices] = target_data['track_type_valid'].values
+        self.built_data['x_cat']['weather'][race_indices, horse_indices] = target_data['weather_valid'].values
+        self.built_data['x_cat']['track_cond'][race_indices, horse_indices] = target_data['track_cond_valid'].values
+        self.built_data['x_cat']['grade'][race_indices, horse_indices] = target_data['grade_valid'].values
+        self.built_data['x_cat']['course'][race_indices, horse_indices] = target_data['course_valid'].values
+        self.built_data['x_cat']['sex'][race_indices, horse_indices] = target_data['sex_valid'].values
+        self.built_data['x_cat']['trainer_area'][race_indices, horse_indices] = target_data['trainer_area_valid'].values
+        self.built_data['x_cat']['trainer_id'][race_indices, horse_indices] = target_data['trainer_id_valid'].values
+        self.built_data['x_cat']['blinker_use'][race_indices, horse_indices] = target_data['blinker_use_valid'].values
+        self.built_data['x_cat']['jockey_sex'][race_indices, horse_indices] = target_data['jockey_sex_valid'].values
+        self.built_data['x_cat']['trainer_sex'][race_indices, horse_indices] = target_data['trainer_sex_valid'].values
+        self.built_data['x_cat']['pedigree_0'][race_indices, horse_indices] = target_data['pedigree_0_valid'].values
+        self.built_data['x_cat']['pedigree_1'][race_indices, horse_indices] = target_data['pedigree_1_valid'].values
+        self.built_data['x_cat']['pedigree_2'][race_indices, horse_indices] = target_data['pedigree_2_valid'].values
+        self.built_data['x_cat']['pedigree_3'][race_indices, horse_indices] = target_data['pedigree_3_valid'].values
+        self.built_data['x_cat']['pedigree_4'][race_indices, horse_indices] = target_data['pedigree_4_valid'].values
+        self.built_data['x_cat']['pedigree_5'][race_indices, horse_indices] = target_data['pedigree_5_valid'].values
+        self.built_data['x_cat']['pedigree_6'][race_indices, horse_indices] = target_data['pedigree_6_valid'].values
+        self.built_data['x_cat']['pedigree_7'][race_indices, horse_indices] = target_data['pedigree_7_valid'].values
+        self.built_data['x_cat']['pedigree_8'][race_indices, horse_indices] = target_data['pedigree_8_valid'].values
+        self.built_data['x_cat']['pedigree_9'][race_indices, horse_indices] = target_data['pedigree_9_valid'].values
+        self.built_data['x_cat']['pedigree_10'][race_indices, horse_indices] = target_data['pedigree_10_valid'].values
+        self.built_data['x_cat']['pedigree_11'][race_indices, horse_indices] = target_data['pedigree_11_valid'].values
+        self.built_data['x_cat']['pedigree_12'][race_indices, horse_indices] = target_data['pedigree_12_valid'].values
+        self.built_data['x_cat']['pedigree_13'][race_indices, horse_indices] = target_data['pedigree_13_valid'].values
+        self.built_data['x_cat']['track'][race_indices, horse_indices] = target_data['track_valid'].values
+
+        # ターゲットの設定
+        self.built_data['rankings'][race_indices, horse_indices] = target_data['ranking_int'].values
+
+        # マスクの設定
+        self.built_data['mask'][race_indices, horse_indices] = True
+
+        # ==========================================
+        # シーケンスデータ部分
         # ==========================================
 
-        # 馬別グループを作成
-        horse_groups = {}
-        for horse_id, group in data.groupby('horse_id_valid'):
-            # 有効な馬番のみ
-            if horse_id != "<NULL>":
-                horse_groups[horse_id] = group.sort_values('kaisai_start_datetime', ascending=False)
+        # グループ化を事前に実行し、辞書として保存
+        horse_groups = {horse_id: group.sort_values('kaisai_start_datetime', ascending=False) 
+                    for horse_id, group in data.groupby('horse_id_valid') if horse_id != "<NULL>"}
+        
+        course_groups = {f"{track}_{track_detail}_{course}": group.sort_values('kaisai_start_datetime', ascending=False)
+                        for (track, track_detail, course), group in data.groupby(['track_valid', 'track_detail_valid', 'course_valid'])
+                        if track != "<NULL>" and track_detail != "<NULL>"}
+        
+        training_horse_groups = {horse_id: group.sort_values('training_datetime', ascending=False)
+                            for horse_id, group in self.additional_prepared_data['training'].groupby('horse_id_valid')  
+                            if horse_id != "<NULL>"}
 
-        # コース別グループを作成
-        course_groups = {}
-        for (track, track_detail, course), group in data.groupby(['track_valid', 'track_detail_valid', 'course_valid']):
-            # 有効なコースのみ (courseはNULLでも良い)
-            if track != "<NULL>" and track_detail != "<NULL>":
-                course_key = f"{track}_{track_detail}_{course}"
-                course_groups[course_key] = group.sort_values('kaisai_start_datetime', ascending=False)
+        # 進捗報告の間隔
+        progress_interval = 1000
 
-        # 馬別グループの作成 (調教データ)
-        training_horse_groups = {}
-        training_data = self.additional_prepared_data['training']
-        for horse_id, group in training_data.groupby('horse_id_valid'):
-            # 有効な馬番のみ
-            if horse_id != "<NULL>":
-                training_horse_groups[horse_id] = group.sort_values('training_datetime', ascending=False)
+        # レース情報をnumpy配列として事前取得
+        race_datetimes = race_info['kaisai_start_datetime'].values
 
-        # ==========================================
-        # レース毎に処理
-        # ==========================================
-
-        # 進捗報告の間隔を設定
-        progress_interval = min(1000, max(1, -(-num_races // 10)))  # 10%ごとに進捗報告
-
-        # 各レースのデータを構築
-        for race_idx, race_id in enumerate(race_ids):
-
+        for race_idx, (race_id, race_datetime) in enumerate(zip(race_ids, race_datetimes)):
             # 進捗ログ出力
             if (race_idx + 1) % progress_interval == 0 or (race_idx + 1) == num_races:
                 progress_pct = (race_idx + 1) / num_races * 100
                 logger.info(f"Processing race {race_idx + 1}/{num_races} ({progress_pct:.1f}%): {race_id}")
 
-            race_data = race_groups.get_group(race_id)
-            
-            # シーケンスデータ構築のためタイムスタンプを取得（最初の行から一度だけ取得）
-            current_datetime = race_data.iloc[0]['kaisai_start_datetime']
-            cutoff_datetime_start = current_datetime - timedelta(days=self.max_prev_days)
-            cutoff_datetime_end = current_datetime - timedelta(hours=self.hours_before_race)
+            # 現在のレースデータを取得
+            race_data = target_data[target_data['race_idx'] == race_idx]
 
-            # ==========================================
-            # 馬毎に処理
-            # ==========================================
+            cutoff_start = race_datetime - np.timedelta64(self.max_prev_days, 'D')
+            cutoff_end = race_datetime - np.timedelta64(self.hours_before_race, 'h')
 
+            # horse_weight_history
             for _, row in race_data.iterrows():
-                horse_idx = row['horse_number_int'] - 1  # 0-indexedに変換
-
-                # マスク
-                self.built_data['mask'][race_idx, horse_idx] = True
-
-                # 数値特徴量
-                self.built_data['x_num']['horse_weight'][race_idx, horse_idx] = row['horse_weight_numeric']
-                self.built_data['x_num']['weight_change'][race_idx, horse_idx] = row['weight_change_numeric']
-                self.built_data['x_num']['distance'][race_idx, horse_idx] = row['distance_numeric']
-                self.built_data['x_num']['race_number'][race_idx, horse_idx] = row['race_number_numeric']
-                self.built_data['x_num']['registration_count'][race_idx, horse_idx] = row['registration_count_numeric']
-                self.built_data['x_num']['horse_number'][race_idx, horse_idx] = row['horse_number_numeric']
-                self.built_data['x_num']['frame_number'][race_idx, horse_idx] = row['frame_number_numeric']
-                self.built_data['x_num']['horse_age'][race_idx, horse_idx] = row['horse_age_numeric']
-                self.built_data['x_num']['burden_weight'][race_idx, horse_idx] = row['burden_weight_numeric']
-
-                # カテゴリ特徴量
-                self.built_data['x_cat']['horse_id'][race_idx, horse_idx] = row['horse_id_valid']
-                self.built_data['x_cat']['jockey_id'][race_idx, horse_idx] = row['jockey_id_valid']
-                self.built_data['x_cat']['track_detail'][race_idx, horse_idx] = row['track_detail_valid']
-                self.built_data['x_cat']['track_type'][race_idx, horse_idx] = row['track_type_valid']
-                self.built_data['x_cat']['weather'][race_idx, horse_idx] = row['weather_valid']
-                self.built_data['x_cat']['track_cond'][race_idx, horse_idx] = row['track_cond_valid']
-                self.built_data['x_cat']['grade'][race_idx, horse_idx] = row['grade_valid']
-                self.built_data['x_cat']['course'][race_idx, horse_idx] = row['course_valid']
-                self.built_data['x_cat']['sex'][race_idx, horse_idx] = row['sex_valid']
-                self.built_data['x_cat']['trainer_area'][race_idx, horse_idx] = row['trainer_area_valid']
-                self.built_data['x_cat']['trainer_id'][race_idx, horse_idx] = row['trainer_id_valid']
-                self.built_data['x_cat']['blinker_use'][race_idx, horse_idx] = row['blinker_use_valid']
-                self.built_data['x_cat']['jockey_sex'][race_idx, horse_idx] = row['jockey_sex_valid']
-                self.built_data['x_cat']['trainer_sex'][race_idx, horse_idx] = row['trainer_sex_valid']
-                self.built_data['x_cat']['pedigree_0'][race_idx, horse_idx] = row['pedigree_0_valid']
-                self.built_data['x_cat']['pedigree_1'][race_idx, horse_idx] = row['pedigree_1_valid']
-                self.built_data['x_cat']['pedigree_2'][race_idx, horse_idx] = row['pedigree_2_valid']
-                self.built_data['x_cat']['pedigree_3'][race_idx, horse_idx] = row['pedigree_3_valid']
-                self.built_data['x_cat']['pedigree_4'][race_idx, horse_idx] = row['pedigree_4_valid']
-                self.built_data['x_cat']['pedigree_5'][race_idx, horse_idx] = row['pedigree_5_valid']
-                self.built_data['x_cat']['pedigree_6'][race_idx, horse_idx] = row['pedigree_6_valid']
-                self.built_data['x_cat']['pedigree_7'][race_idx, horse_idx] = row['pedigree_7_valid']
-                self.built_data['x_cat']['pedigree_8'][race_idx, horse_idx] = row['pedigree_8_valid']
-                self.built_data['x_cat']['pedigree_9'][race_idx, horse_idx] = row['pedigree_9_valid']
-                self.built_data['x_cat']['pedigree_10'][race_idx, horse_idx] = row['pedigree_10_valid']
-                self.built_data['x_cat']['pedigree_11'][race_idx, horse_idx] = row['pedigree_11_valid']
-                self.built_data['x_cat']['pedigree_12'][race_idx, horse_idx] = row['pedigree_12_valid']
-                self.built_data['x_cat']['pedigree_13'][race_idx, horse_idx] = row['pedigree_13_valid']
-                self.built_data['x_cat']['track'][race_idx, horse_idx] = row['track_valid']
-
-                # ターゲット
-                self.built_data['rankings'][race_idx, horse_idx] = row['ranking_int']  # ranking_intを使用
-
-                # ==========================================
-                # シーケンスデータ
-                # ==========================================
-
-                # 馬毎のシーケンスデータ構築時に使用するキー
-                horse_key = row['horse_id_valid']  
-
-                # 馬体重履歴データの構築
+                horse_idx = row['horse_idx']
+                horse_key = row['horse_id_valid']
                 if horse_key in horse_groups:
                     history = horse_groups[horse_key]
-                    valid_history = history[
-                        (history['kaisai_start_datetime'] >= cutoff_datetime_start) & 
-                        (history['kaisai_start_datetime'] < cutoff_datetime_end)
-                    ].head(self.max_hist_len)  # 既にソート済みなのでheadで十分
-                    valid_length = len(valid_history)
-                    if valid_length > 0:
-                        days_before = np.array([(current_datetime - hist_datetime).total_seconds() / (24 * 3600) for hist_datetime in valid_history['kaisai_start_datetime']], dtype=np.float32)
-                        self.built_data['sequence_data']['horse_weight_history']['x_num']['days_before'][race_idx, horse_idx, :valid_length] = days_before
-                        self.built_data['sequence_data']['horse_weight_history']['x_num']['horse_weight'][race_idx, horse_idx, :valid_length] = valid_history['horse_weight_numeric'].values
-                        self.built_data['sequence_data']['horse_weight_history']['x_num']['weight_change'][race_idx, horse_idx, :valid_length] = valid_history['weight_change_numeric'].values
-                        self.built_data['sequence_data']['horse_weight_history']['mask'][race_idx, horse_idx, :valid_length] = True
+                    mask = (history['kaisai_start_datetime'] >= cutoff_start) & (history['kaisai_start_datetime'] < cutoff_end)
+                    valid_history = history[mask].head(self.max_hist_len)
+                    if len(valid_history) > 0:
+                        days_before = ((race_datetime - valid_history['kaisai_start_datetime']).dt.total_seconds() / 86400).astype(np.float32)
+                        length = len(valid_history)
+                        self.built_data['sequence_data']['horse_weight_history']['x_num']['days_before'][race_idx, horse_idx, :length] = days_before
+                        self.built_data['sequence_data']['horse_weight_history']['x_num']['horse_weight'][race_idx, horse_idx, :length] = valid_history['horse_weight_numeric'].values
+                        self.built_data['sequence_data']['horse_weight_history']['x_num']['weight_change'][race_idx, horse_idx, :length] = valid_history['weight_change_numeric'].values
+                        self.built_data['sequence_data']['horse_weight_history']['mask'][race_idx, horse_idx, :length] = True
 
-                # コース毎のシーケンスデータ構築時に使用するキー
+            # course_lap_time_history
+            for _, row in race_data.iterrows():
+                horse_idx = row['horse_idx']
                 course_key = f"{row['track_valid']}_{row['track_detail_valid']}_{row['course_valid']}"
-
-                # コースのラップタイム履歴データの構築
                 if course_key in course_groups:
                     history = course_groups[course_key]
-                    valid_history = history[
-                        (history['kaisai_start_datetime'] >= cutoff_datetime_start) & 
-                        (history['kaisai_start_datetime'] < cutoff_datetime_end)
-                    ].head(self.max_hist_len)  # 既にソート済みなのでheadで十分
-                    valid_length = len(valid_history)
-                    if valid_length > 0:
-                        days_before = np.array([(current_datetime - hist_datetime).total_seconds() / (24 * 3600) for hist_datetime in valid_history['kaisai_start_datetime']], dtype=np.float32)
-                        self.built_data['sequence_data']['course_lap_time_history']['x_num']['days_before'][race_idx, horse_idx, :valid_length] = days_before
+                    mask = (history['kaisai_start_datetime'] >= cutoff_start) & (history['kaisai_start_datetime'] < cutoff_end)
+                    valid_history = history[mask].head(self.max_hist_len)
+                    if len(valid_history) > 0:
+                        days_before = ((race_datetime - valid_history['kaisai_start_datetime']).dt.total_seconds() / 86400).astype(np.float32)
+                        length = len(valid_history)
+                        self.built_data['sequence_data']['course_lap_time_history']['x_num']['days_before'][race_idx, horse_idx, :length] = days_before
                         for i in range(25):
-                            self.built_data['sequence_data']['course_lap_time_history']['x_num'][f'lap_time_{i}'][race_idx, horse_idx, :valid_length] = valid_history[f'lap_time_{i}_numeric'].values
-                        self.built_data['sequence_data']['course_lap_time_history']['mask'][race_idx, horse_idx, :valid_length] = True
+                            self.built_data['sequence_data']['course_lap_time_history']['x_num'][f'lap_time_{i}'][race_idx, horse_idx, :length] = valid_history[f'lap_time_{i}_numeric'].values
+                        self.built_data['sequence_data']['course_lap_time_history']['mask'][race_idx, horse_idx, :length] = True
 
-                # 調教履歴データの構築
-                if horse_key in training_horse_groups:
-                    training_history = training_horse_groups[horse_key]
-                    valid_training_history = training_history[
-                        (training_history['training_datetime'] >= cutoff_datetime_start) & 
-                        (training_history['training_datetime'] < cutoff_datetime_end)
-                    ].head(self.max_hist_len)  # 既にソート済みなのでheadで十分
-                    valid_length = len(valid_training_history)
-                    if valid_length > 0:
-                        days_before = np.array([(current_datetime - hist_datetime).total_seconds() / (24 * 3600) for hist_datetime in valid_training_history['training_datetime']], dtype=np.float32)
-                        self.built_data['sequence_data']['training_history']['x_num']['days_before'][race_idx, horse_idx, :valid_length] = days_before
-                        
-                        # 数値特徴量（時間データ）
-                        time_features = [
-                            'furlong_10_total_time', 'furlong_9_total_time', 'furlong_8_total_time', 'furlong_7_total_time',
-                            'furlong_6_total_time', 'furlong_5_total_time', 'furlong_4_total_time', 'furlong_3_total_time', 'furlong_2_total_time'
-                        ]
-                        lap_time_features = [
-                            'lap_time_2000_1800', 'lap_time_1800_1600', 'lap_time_1600_1400', 'lap_time_1400_1200',
-                            'lap_time_1200_1000', 'lap_time_1000_800', 'lap_time_800_600', 'lap_time_600_400',
-                            'lap_time_400_200', 'lap_time_200_0'
-                        ]
-                        
-                        for feature in time_features:
-                            feature_col = f'{feature}_numeric'
-                            self.built_data['sequence_data']['training_history']['x_num'][feature][race_idx, horse_idx, :valid_length] = valid_training_history[feature_col].values
-                        
-                        for feature in lap_time_features:
-                            feature_col = f'{feature}_numeric'
-                            self.built_data['sequence_data']['training_history']['x_num'][feature][race_idx, horse_idx, :valid_length] = valid_training_history[feature_col].values
-                        
-                        # カテゴリ特徴量
-                        self.built_data['sequence_data']['training_history']['x_cat']['training_center'][race_idx, horse_idx, :valid_length] = valid_training_history['training_center_valid'].values
-                        self.built_data['sequence_data']['training_history']['x_cat']['training_type'][race_idx, horse_idx, :valid_length] = valid_training_history['training_type_valid'].values
-                        self.built_data['sequence_data']['training_history']['x_cat']['course'][race_idx, horse_idx, :valid_length] = valid_training_history['course_valid'].values
-                        self.built_data['sequence_data']['training_history']['x_cat']['track_direction'][race_idx, horse_idx, :valid_length] = valid_training_history['track_direction_valid'].values
-                        
-                        self.built_data['sequence_data']['training_history']['mask'][race_idx, horse_idx, :valid_length] = True
-                
-
+            # training_history
+            for _, row in race_data.iterrows():
+                horse_idx = row['horse_idx']
+                training_horse_key = row['horse_id_valid']
+                if training_horse_key in training_horse_groups:
+                    history = training_horse_groups[training_horse_key]
+                    mask = (history['training_datetime'] >= cutoff_start) & (history['training_datetime'] < cutoff_end)
+                    valid_history = history[mask].head(self.max_hist_len)
+                    if len(valid_history) > 0:
+                        days_before = ((race_datetime - valid_history['training_datetime']).dt.total_seconds() / 86400).astype(np.float32)
+                        length = len(valid_history)
+                        self.built_data['sequence_data']['training_history']['x_num']['days_before'][race_idx, horse_idx, :length] = days_before
+                        self.built_data['sequence_data']['training_history']['x_num']['furlong_10_total_time'][race_idx, horse_idx, :length] = valid_history[f'furlong_10_total_time_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['furlong_9_total_time'][race_idx, horse_idx, :length] = valid_history[f'furlong_9_total_time_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['furlong_8_total_time'][race_idx, horse_idx, :length] = valid_history[f'furlong_8_total_time_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['furlong_7_total_time'][race_idx, horse_idx, :length] = valid_history[f'furlong_7_total_time_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['furlong_6_total_time'][race_idx, horse_idx, :length] = valid_history[f'furlong_6_total_time_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['furlong_5_total_time'][race_idx, horse_idx, :length] = valid_history[f'furlong_5_total_time_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['furlong_4_total_time'][race_idx, horse_idx, :length] = valid_history[f'furlong_4_total_time_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['furlong_3_total_time'][race_idx, horse_idx, :length] = valid_history[f'furlong_3_total_time_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['furlong_2_total_time'][race_idx, horse_idx, :length] = valid_history[f'furlong_2_total_time_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['lap_time_2000_1800'][race_idx, horse_idx, :length] = valid_history[f'lap_time_2000_1800_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['lap_time_1800_1600'][race_idx, horse_idx, :length] = valid_history[f'lap_time_1800_1600_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['lap_time_1600_1400'][race_idx, horse_idx, :length] = valid_history[f'lap_time_1600_1400_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['lap_time_1400_1200'][race_idx, horse_idx, :length] = valid_history[f'lap_time_1400_1200_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['lap_time_1200_1000'][race_idx, horse_idx, :length] = valid_history[f'lap_time_1200_1000_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['lap_time_1000_800'][race_idx, horse_idx, :length] = valid_history[f'lap_time_1000_800_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['lap_time_800_600'][race_idx, horse_idx, :length] = valid_history[f'lap_time_800_600_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['lap_time_600_400'][race_idx, horse_idx, :length] = valid_history[f'lap_time_600_400_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['lap_time_400_200'][race_idx, horse_idx, :length] = valid_history[f'lap_time_400_200_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_num']['lap_time_200_0'][race_idx, horse_idx, :length] = valid_history[f'lap_time_200_0_numeric'].values
+                        self.built_data['sequence_data']['training_history']['x_cat']['training_center'][race_idx, horse_idx, :length] = valid_history['training_center_valid'].values
+                        self.built_data['sequence_data']['training_history']['x_cat']['training_type'][race_idx, horse_idx, :length] = valid_history['training_type_valid'].values
+                        self.built_data['sequence_data']['training_history']['x_cat']['course'][race_idx, horse_idx, :length] = valid_history['course_valid'].values
+                        self.built_data['sequence_data']['training_history']['x_cat']['track_direction'][race_idx, horse_idx, :length] = valid_history['track_direction_valid'].values
+                        self.built_data['sequence_data']['training_history']['mask'][race_idx, horse_idx, :length] = True
+            
         logger.info("Data structure construction completed successfully.")
         return self
 
     def fit(self):
-        # エイリアス設定（血統情報を統一）
         self.params = {
             'numerical': {}, 
             'categorical': {}, 
-            'aliases': {
-                # 血統情報のエイリアス
-                'pedigree_0': 'pedigree',
-                'pedigree_1': 'pedigree',
-                'pedigree_2': 'pedigree',
-                'pedigree_3': 'pedigree',
-                'pedigree_4': 'pedigree',
-                'pedigree_5': 'pedigree',
-                'pedigree_6': 'pedigree',
-                'pedigree_7': 'pedigree',
-                'pedigree_8': 'pedigree',
-                'pedigree_9': 'pedigree',
-                'pedigree_10': 'pedigree',
-                'pedigree_11': 'pedigree',
-                'pedigree_12': 'pedigree',
-                'pedigree_13': 'pedigree',
-                # ラップタイムのエイリアス
-                **{f'lap_time_{i}': 'lap_time' for i in range(25)},
-                # 調教タイムのエイリアス
-                'furlong_10_total_time': 'furlong_total_time',
-                'furlong_9_total_time': 'furlong_total_time',
-                'furlong_8_total_time': 'furlong_total_time',
-                'furlong_7_total_time': 'furlong_total_time',
-                'furlong_6_total_time': 'furlong_total_time',
-                'furlong_5_total_time': 'furlong_total_time',
-                'furlong_4_total_time': 'furlong_total_time',
-                'furlong_3_total_time': 'furlong_total_time',
-                'furlong_2_total_time': 'furlong_total_time',
-                # 調教ラップタイムのエイリアス
-                'lap_time_2000_1800': 'training_lap_time',
-                'lap_time_1800_1600': 'training_lap_time',
-                'lap_time_1600_1400': 'training_lap_time',
-                'lap_time_1400_1200': 'training_lap_time',
-                'lap_time_1200_1000': 'training_lap_time',
-                'lap_time_1000_800': 'training_lap_time',
-                'lap_time_800_600': 'training_lap_time',
-                'lap_time_600_400': 'training_lap_time',
-                'lap_time_400_200': 'training_lap_time',
-                'lap_time_200_0': 'training_lap_time',
-            }
         }
 
         # 特徴量の収集
         feature_values = {'numerical': defaultdict(lambda: np.full(0, np.nan, dtype=np.float32)), 'categorical': defaultdict(lambda: np.full(0, "<NULL>", dtype=object))}
         for name, data in self.built_data['x_num'].items():
-            alias = self.params['aliases'].get(name, name)
+            alias = self.feature_aliases.get(name, name)
             feature_values['numerical'][alias] = np.concatenate([feature_values['numerical'][alias], data.reshape(-1)])
         for name, data in self.built_data['x_cat'].items():
-            alias = self.params['aliases'].get(name, name)
+            alias = self.feature_aliases.get(name, name)
             feature_values['categorical'][alias] = np.concatenate([feature_values['categorical'][alias], data.reshape(-1)])
         for seq_data in self.built_data['sequence_data'].values():
             for name, data in seq_data['x_num'].items():
-                alias = self.params['aliases'].get(name, name)
+                alias = self.feature_aliases.get(name, name)
                 feature_values['numerical'][alias] = np.concatenate([feature_values['numerical'][alias], data.reshape(-1)])
             for name, data in seq_data['x_cat'].items():
-                alias = self.params['aliases'].get(name, name)
+                alias = self.feature_aliases.get(name, name)
                 feature_values['categorical'][alias] = np.concatenate([feature_values['categorical'][alias], data.reshape(-1)])
 
         # 数値特徴量のパラメータ取得

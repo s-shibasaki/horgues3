@@ -386,7 +386,9 @@ class RaceTransformer(nn.Module):
 class HorguesModel(nn.Module):
     """統合された競馬予測モデル"""
 
-    def __init__(self, 
+    def __init__(self,
+                 sequence_names: List[str],
+                 feature_aliases: Dict[str, str],
                  dataset_params: Dict[str, Any],
                  d_token: int = 192,
                  num_bins: int = 10,
@@ -404,15 +406,14 @@ class HorguesModel(nn.Module):
                  dropout: float = 0.3,
                  max_horses: int = 18):
         super().__init__()
+        self.sequence_names = sequence_names
+        self.feature_aliases = feature_aliases
         self.d_token = d_token
         self.max_horses = max_horses
 
         # dataset_params から必要な情報を抽出
         self.numerical_features = list(dataset_params['numerical'].keys())
         self.categorical_features = {name: config['num_classes'] for name, config in dataset_params['categorical'].items()}
-        self.feature_aliases = dataset_params['aliases']
-
-        self.sequences = ['horse_weight_hist', 'course_lap_time_history', 'training_history']
 
         # 共通のFeatureTokenizer（SoftBinning対応）
         self.tokenizer = FeatureTokenizer(
@@ -428,7 +429,7 @@ class HorguesModel(nn.Module):
 
         # 時系列用のFTTransformer (特徴量統合用)
         self.sequence_ft_transformers = nn.ModuleDict()
-        for seq_name in self.sequences:
+        for seq_name in self.sequence_names:
             self.sequence_ft_transformers[seq_name] = SequenceTransformer(
                 d_token=d_token,
                 n_layers=ft_n_layers,
@@ -439,7 +440,7 @@ class HorguesModel(nn.Module):
 
         # 時系列用のSequenceTransformer (時系列処理用)
         self.sequence_transformers = nn.ModuleDict()
-        for seq_name in self.sequences:
+        for seq_name in self.sequence_names:
             self.sequence_transformers[seq_name] = SequenceTransformer(
                 d_token=d_token,
                 n_layers=seq_n_layers,

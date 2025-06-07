@@ -203,7 +203,13 @@ namespace JVDataCollector
             Console.WriteLine($"  Key: {key}");
 
             int result = axJVLink1.JVRTOpen(dataSpec, key);
-            if (result != 0)
+            if (result == -1)
+            {
+                // 該当データなし - エラーではない
+                Console.WriteLine($"No realtime data found for the specified criteria (DataSpec: {dataSpec}, Key: {key})");
+                return;
+            }
+            else if (result != 0)
             {
                 throw new InvalidOperationException($"JVRTOpen ({dataSpec}, {key}) failed with error code: {result}");
             }
@@ -269,7 +275,13 @@ namespace JVDataCollector
             int filesToRead = 0, filesToDownload = 0;
 
             result = axJVLink1.JVOpen(dataSpec, fromTime, option, ref filesToRead, ref filesToDownload, out string lastFileTimestamp);
-            if (result != 0)
+            if (result == -1)
+            {
+                // 該当データなし - エラーではない
+                Console.WriteLine($"No data found for the specified criteria (DataSpec: {dataSpec}, FromTime: {fromTime})");
+                return;
+            }
+            else if (result != 0)
             {
                 throw new InvalidOperationException($"JVOpen ({dataSpec}) failed with error code: {result}");
             }
