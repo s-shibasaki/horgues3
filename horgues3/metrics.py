@@ -121,6 +121,7 @@ class BettingCalibrationMetric(BaseMetric):
     出力メトリクス:
         - brier_score: ブライアスコア（確率予測の精度）
         - calibration_error: 較正エラー（予測確率と実確率の差）
+        - bin_details: 各ビンの詳細情報（confidence, accuracy, error, count）
     """
     
     def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None,
@@ -165,16 +166,24 @@ class BettingCalibrationMetric(BaseMetric):
             # ブライアスコア
             brier_score = np.mean((all_probs - all_outcomes) ** 2)
             
-            # 較正エラー
-            bin_boundaries = np.linspace(0, 1, self.n_bins + 1)
+            # パーセンタイルベースでビンを作成（各ビンの件数を等しくする）
+            percentiles = np.linspace(0, 100, self.n_bins + 1)
+            bin_boundaries = np.percentile(all_probs, percentiles)
+            
             calibration_error = 0.0
             total_samples = len(all_probs)
+            bin_details = []
             
             for i in range(self.n_bins):
                 bin_lower = bin_boundaries[i]
                 bin_upper = bin_boundaries[i + 1]
                 
-                in_bin = (all_probs > bin_lower) & (all_probs <= bin_upper)
+                # 最初のビン以外は左端を除外、最後のビンは右端を含む
+                if not i == self.n_bins - 1:
+                    in_bin = (all_probs >= bin_lower) & (all_probs < bin_upper)
+                else:
+                    in_bin = (all_probs >= bin_lower) & (all_probs <= bin_upper)
+                
                 bin_size = in_bin.sum()
                 
                 if bin_size > 0:
@@ -183,10 +192,22 @@ class BettingCalibrationMetric(BaseMetric):
                     bin_weight = bin_size / total_samples
                     bin_error = abs(bin_confidence - bin_accuracy)
                     calibration_error += bin_weight * bin_error
+                    
+                    bin_details.append({
+                        'bin_lower': float(bin_lower),
+                        'bin_upper': float(bin_upper),
+                        'confidence': float(bin_confidence),
+                        'accuracy': float(bin_accuracy),
+                        'error': float(bin_error),
+                        'count': int(bin_size),
+                        'weight': float(bin_weight)
+                    })
             
             metrics['calibration'][bet_type] = {
                 'brier_score': brier_score,
-                'calibration_error': calibration_error
+                'calibration_error': calibration_error,
+                'bin_details': bin_details,
+                'total_samples': total_samples
             }
         
         return metrics
@@ -460,6 +481,92 @@ class AdaptiveKellyCriterionBettingMetric(KellyCriterionBettingMetric):
                     'optimal_threshold': optimal_threshold,
                     'best_score': best_score,
                     **validation_result
+                }
+        
+        return metrics
+
+
+class RankingPercentileMetric(BaseMetric):
+    """
+    正解組合せの予測確率順位パーセンタイルメトリクス
+    
+    概要:
+        正解の組合せが予測確率でソートした際に上位何パーセントに位置するかを測定します。
+        モデルの識別能力と予測精度を評価する重要な指標です。
+    
+    出力メトリクス:
+        - mean_percentile: 正解組合せの平均順位パーセンタイル
+        - median_percentile: 正解組合せの中央値順位パーセンタイル
+        - top_10_percent_rate: 上位10%以内に入った割合
+        - top_25_percent_rate: 上位25%以内に入った割合
+        - bottom_25_percent_rate: 下位25%以内に入った割合（悪い予測の割合）
+    """
+    
+    def __init__(self, rankings: np.ndarray, mask: Optional[np.ndarray] = None,
+                 winning_tickets: Optional[Dict[str, np.ndarray]] = None,
+                 odds: Optional[Dict[str, np.ndarray]] = None):
+        super().__init__(rankings, mask, winning_tickets, odds)
+        self.bet_types = ['tansho', 'fukusho', 'umaren', 'wide', 'umatan', 'sanrenfuku', 'sanrentan']
+    
+    def __call__(self, probabilities: Dict[str, np.ndarray]) -> Dict[str, Any]:
+        if self.winning_tickets is None:
+            return {}
+        
+        metrics = {'ranking_percentile': {}}
+        
+        for bet_type in self.bet_types:
+            if bet_type not in probabilities or bet_type not in self.winning_tickets:
+                continue
+            
+            pred_probs = probabilities[bet_type]
+            winning_tickets = self.winning_tickets[bet_type]
+            num_races = pred_probs.shape[0]
+            
+            percentiles = []
+            
+            for race_idx in range(num_races):
+                race_probs = pred_probs[race_idx]
+                race_winning = winning_tickets[race_idx]
+                
+                # 有効な組合せのマスク
+                valid_mask = race_probs > 0
+                if not valid_mask.any():
+                    continue
+                
+                # 正解組合せの確認
+                winning_indices = np.where(race_winning & valid_mask)[0]
+                if len(winning_indices) == 0:
+                    continue
+                
+                # 確率で降順ソート（高い確率が上位）
+                valid_probs = race_probs[valid_mask]
+                sorted_indices = np.argsort(valid_probs)[::-1]
+                total_combinations = len(valid_probs)
+                
+                # 各正解組合せの順位パーセンタイルを計算
+                for winning_idx in winning_indices:
+                    # 元のインデックスから有効インデックス内での位置を特定
+                    valid_idx_map = np.where(valid_mask)[0]
+                    winning_pos_in_valid = np.where(valid_idx_map == winning_idx)[0]
+                    
+                    if len(winning_pos_in_valid) > 0:
+                        winning_pos = winning_pos_in_valid[0]
+                        rank = np.where(sorted_indices == winning_pos)[0][0] + 1
+                        percentile = (rank / total_combinations) * 100
+                        percentiles.append(percentile)
+            
+            if percentiles:
+                percentiles = np.array(percentiles)
+                
+                metrics['ranking_percentile'][bet_type] = {
+                    'mean_percentile': float(np.mean(percentiles)),
+                    'median_percentile': float(np.median(percentiles)),
+                    'std_percentile': float(np.std(percentiles)),
+                    'top_10_percent_rate': float(np.mean(percentiles <= 10)),
+                    'top_25_percent_rate': float(np.mean(percentiles <= 25)),
+                    'top_50_percent_rate': float(np.mean(percentiles <= 50)),
+                    'bottom_25_percent_rate': float(np.mean(percentiles >= 75)),
+                    'num_samples': len(percentiles)
                 }
         
         return metrics

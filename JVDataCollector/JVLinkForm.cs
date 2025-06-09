@@ -148,7 +148,7 @@ namespace JVDataCollector
                 }
 
                 // レース毎に取得するデータ種別ID
-                string[] raceDataSpecs = { "0B20", "0B33", "0B34", "0B35", "0B36", "0B41", "0B42" };
+                string[] raceDataSpecs = { "0B20", "0B30" };
                 var raceIds = GetTodayRaceIds(connection, today);
                 foreach (string raceId in raceIds)
                 {
