@@ -76,6 +76,8 @@ class HorguesDataset(Dataset):
             'lap_time_600_400': 'training_lap_time',
             'lap_time_400_200': 'training_lap_time',
             'lap_time_200_0': 'training_lap_time',
+            # 相手馬情報
+            'rival_horse_id': 'horse_id',
         }
 
     def fetch(self):
@@ -193,6 +195,9 @@ class HorguesDataset(Dataset):
             ltp.lap_time_22 as lap_time_22_raw,
             ltp.lap_time_23 as lap_time_23_raw,
             ltp.lap_time_24 as lap_time_24_raw,
+            hri.finish_time as finish_time_raw,
+            hri.last_3furlong_time as last_3furlong_raw,
+            hri.last_4furlong_time as last_4furlong_raw,
 
             -- カテゴリ特徴量
             hri.blood_registration_number as horse_id_raw,
@@ -224,6 +229,8 @@ class HorguesDataset(Dataset):
             pp.pedigree_12 as pedigree_12_raw,
             pp.pedigree_13 as pedigree_13_raw,
             hri.track_code as track_raw,
+            hri.running_style_judgment as running_style_raw,
+            --hrir.rival_blood_registration_number as rival_horse_id_raw,
 
             -- ターゲット
             hri.final_order as ranking_raw
@@ -250,6 +257,17 @@ class HorguesDataset(Dataset):
         LEFT JOIN
             lap_time_pivot ltp ON
             hri.kaisai_year || hri.kaisai_month_day || hri.track_code || hri.kaisai_kai || hri.kaisai_day || hri.race_number = ltp.race_id
+        --INNER JOIN
+        --    public.horse_race_info_rival hrir ON
+        --    rd.kaisai_year = hrir.kaisai_year AND
+        --    rd.kaisai_month_day = hrir.kaisai_month_day AND
+        --    rd.track_code = hrir.track_code AND
+        --    rd.kaisai_kai = hrir.kaisai_kai AND
+        --    rd.kaisai_day = hrir.kaisai_day AND
+        --    rd.race_number = hrir.race_number AND
+        --    hri.horse_number = hrir.horse_number AND
+        --    hrir.rival_index = 0
+
         WHERE 
             (hri.kaisai_year > '{start_year}' OR (hri.kaisai_year = '{start_year}' AND hri.kaisai_month_day >= '{start_month_day}')) AND
             (hri.kaisai_year < '{end_year}' OR (hri.kaisai_year = '{end_year}' AND hri.kaisai_month_day <= '{end_month_day}'))
@@ -434,7 +452,42 @@ class HorguesDataset(Dataset):
         data[columns] = data[columns].apply(lambda row: pd.Series(
             np.concatenate([np.full(np.sum(np.isnan(row)), np.nan), row[~np.isnan(row)]])
         ), axis=1)
+
+        # finish_time_numeric: 走破タイム
+        data['finish_time_numeric'] = pd.to_numeric(data['finish_time_raw'][0], errors='coerce').astype(np.float32) * 60 + pd.to_numeric(data['finish_time_raw'][1:], errors='coerce').astype(np.float32) * 0.1
+        data.loc[data['finish_time_numeric'] == 0, 'finish_time_numeric'] = np.nan
+
+        # speed_numeric: 走破速度
+        data['speed_numeric'] = data['distance_numeric'] / data['finish_time_numeric']
+
+        # last_3furlong_numeric: 後3ハロンタイム
+        data['last_3furlong_numeric'] = pd.to_numeric(data['last_3furlong_raw'], errors='coerce').astype(np.float32) * 0.1
+        # 0をnanにする
+        data.loc[data['last_3furlong_numeric'] == 0, 'last_3furlong_numeric'] = np.nan
+        # 障害はnanにする
+        shogai_mask = data['track_detail_raw'].between('51', '59')
+        data.loc[shogai_mask, 'last_3furlong_numeric'] = np.nan
+        # 後4ハロンタイムが設定されていれば0.75倍
+        four_furlong = pd.to_numeric(data['last_4furlong_raw'], errors='coerce').astype(np.float32) * 0.1
+        four_furlong_mask = four_furlong.notna() & (four_furlong != 0)
+        data.loc[four_furlong_mask, 'last_3furlong_numeric'] = four_furlong * 0.75
+
+        # 1. 相対的な馬体重（平均からの差）
+        race_avg_weight = data.groupby('race_id')['horse_weight_numeric'].transform('mean')
+        data['relative_horse_weight_numeric'] = data['horse_weight_numeric'] - race_avg_weight
         
+        # 2. 相対的な負担重量
+        race_avg_burden = data.groupby('race_id')['burden_weight_numeric'].transform('mean')
+        data['relative_burden_weight_numeric'] = data['burden_weight_numeric'] - race_avg_burden
+        
+        # 4. 距離適性（前走との距離差）
+        data['distance_change_numeric'] = data.groupby('horse_id_raw')['distance_numeric'].diff()
+        data.loc[data['horse_id_raw'] == '0000000000', 'distance_change_numeric'] = np.nan
+        
+        # 5. 休養期間（日数）
+        data['rest_days_numeric'] = data.groupby('horse_id_raw')['kaisai_start_datetime'].diff().dt.days
+        data.loc[data['horse_id_raw'] == '0000000000', 'rest_days_numeric'] = np.nan
+
         # ==========================================
         # カテゴリ特徴量
         # ==========================================
@@ -452,8 +505,8 @@ class HorguesDataset(Dataset):
         data.loc[data['track_detail_valid'] == "00", 'track_detail_valid'] = "<NULL>"  # 00は無効とする
 
         # track_type_valid: 芝 or ダート
-        turf_mask = data['track_detail_valid'].between('10', '22') | data['track_detail_valid'].equals('51') | data['track_detail_valid'].between('53', '59')
-        dirt_mask = data['track_detail_valid'].between('23', '29') | data['track_detail_valid'].equals('52')
+        turf_mask = data['track_detail_valid'].between('10', '22') | (data['track_detail_valid'] == '51') | data['track_detail_valid'].between('53', '59')
+        dirt_mask = data['track_detail_valid'].between('23', '29') | (data['track_detail_valid'] == '52')
         data['track_type_valid'] = "<NULL>"
         data.loc[turf_mask, 'track_type_valid'] = 'turf'
         data.loc[dirt_mask, 'track_type_valid'] = 'dirt'
@@ -509,6 +562,14 @@ class HorguesDataset(Dataset):
         # track_valid: 競馬場コード
         data['track_valid'] = data['track_raw'].fillna("<NULL>")
         data.loc[data['track_valid'] == "00", 'track_valid'] = "<NULL>"
+
+        # running_style_valid: 脚質判定
+        data['running_style_valid'] = data['running_style_raw'].fillna('<NULL>')
+        data.loc[data['running_style_valid'] == '0', 'running_style_valid'] = '<NULL>'
+
+        # rival_horse_id_valid: 相手馬情報
+        # data['rival_horse_id_valid'] = data['rival_horse_id_raw'].fillna("<NULL>")
+        # data.loc[data['rival_horse_id_valid'] == "0000000000", 'rival_horse_id_valid'] = "<NULL>"  # 0000000000は無効とする
 
         # ==========================================
         # ターゲット
@@ -609,6 +670,10 @@ class HorguesDataset(Dataset):
                 "frame_number": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
                 "horse_age": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
                 "burden_weight": np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
+                'relative_horse_weight': np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
+                'relative_burden_weight': np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
+                'distance_change': np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
+                'rest_days': np.full((num_races, self.max_horses), np.nan, dtype=np.float32),
             },
             "x_cat": {
                 "horse_id": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
@@ -642,16 +707,160 @@ class HorguesDataset(Dataset):
                 "track": np.full((num_races, self.max_horses), "<NULL>", dtype=object),
             },
             "sequence_data": {
-                "horse_weight_history": {
+                "horse_history": {
                     "x_num": {
                         'days_before': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                         "horse_weight": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                         "weight_change": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "distance": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "race_number": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "registration_count": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "horse_number": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "frame_number": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "horse_age": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "burden_weight": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "finish_time": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "speed": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "last_3furlong": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                     },
-                    "x_cat": {},
+                    "x_cat": {
+                        'horse_id': np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "jockey_id": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        'track_detail': np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        'track_type': np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "weather": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "track_cond": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "grade": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "course": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "sex": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "trainer_area": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "trainer_id": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "blinker_use": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "jockey_sex": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "trainer_sex": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_0": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_1": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_2": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_3": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_4": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_5": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_6": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_7": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_8": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_9": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_10": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_11": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_12": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_13": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "track": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "running_style": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        # "rival_horse_id": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                    },
                     "mask": np.zeros((num_races, self.max_horses, self.max_hist_len), dtype=bool),
                 },
-                "course_lap_time_history": {
+                'jockey_history': {
+                    "x_num": {
+                        'days_before': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "horse_weight": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "weight_change": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "distance": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "race_number": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "registration_count": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "horse_number": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "frame_number": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "horse_age": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "burden_weight": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "finish_time": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "speed": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "last_3furlong": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                    },
+                    "x_cat": {
+                        "horse_id": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        'jockey_id': np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        'track_detail': np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        'track_type': np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "weather": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "track_cond": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "grade": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "course": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "sex": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "trainer_area": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "trainer_id": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "blinker_use": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "jockey_sex": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "trainer_sex": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_0": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_1": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_2": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_3": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_4": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_5": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_6": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_7": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_8": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_9": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_10": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_11": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_12": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_13": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "track": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "running_style": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        # "rival_horse_id": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                    },
+                    "mask": np.zeros((num_races, self.max_horses, self.max_hist_len), dtype=bool),
+                },
+                'trainer_history': {
+                    "x_num": {
+                        'days_before': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "horse_weight": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "weight_change": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "distance": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "race_number": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "registration_count": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "horse_number": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "frame_number": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "horse_age": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "burden_weight": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "finish_time": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "speed": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "last_3furlong": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                    },
+                    "x_cat": {
+                        "horse_id": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "jockey_id": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        'track_detail': np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        'track_type': np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "weather": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "track_cond": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "grade": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "course": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "sex": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "trainer_area": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "trainer_id": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "blinker_use": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "jockey_sex": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "trainer_sex": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_0": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_1": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_2": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_3": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_4": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_5": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_6": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_7": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_8": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_9": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_10": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_11": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_12": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "pedigree_13": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "track": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        "running_style": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                        # "rival_horse_id": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
+                    },
+                    "mask": np.zeros((num_races, self.max_horses, self.max_hist_len), dtype=bool),
+                },
+                  "course_lap_time_history": {
                     "x_num": {
                         'days_before': np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                         **{f"lap_time_{i}": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32) for i in range(25)}
@@ -714,6 +923,10 @@ class HorguesDataset(Dataset):
         self.built_data['x_num']['frame_number'][race_indices, horse_indices] = target_data['frame_number_numeric'].values
         self.built_data['x_num']['horse_age'][race_indices, horse_indices] = target_data['horse_age_numeric'].values
         self.built_data['x_num']['burden_weight'][race_indices, horse_indices] = target_data['burden_weight_numeric'].values
+        self.built_data['x_num']['relative_horse_weight'][race_indices, horse_indices] = target_data['relative_horse_weight_numeric'].values
+        self.built_data['x_num']['relative_burden_weight'][race_indices, horse_indices] = target_data['relative_burden_weight_numeric'].values
+        self.built_data['x_num']['distance_change'][race_indices, horse_indices] = target_data['distance_change_numeric'].values
+        self.built_data['x_num']['rest_days'][race_indices, horse_indices] = target_data['rest_days_numeric'].values
         
         # カテゴリ特徴量の設定
         self.built_data['x_cat']['horse_id'][race_indices, horse_indices] = target_data['horse_id_valid'].values
@@ -760,6 +973,12 @@ class HorguesDataset(Dataset):
         horse_groups = {horse_id: group.sort_values('kaisai_start_datetime', ascending=False) 
                     for horse_id, group in data.groupby('horse_id_valid') if horse_id != "<NULL>"}
         
+        jockey_groups = {jockey_id: group.sort_values('kaisai_start_datetime', ascending=False)
+                        for jockey_id, group in data.groupby('jockey_id_valid') if jockey_id != "<NULL>"}
+        
+        trainer_groups = {trainer_id: group.sort_values('kaisai_start_datetime', ascending=False)
+                         for trainer_id, group in data.groupby('trainer_id_valid') if trainer_id != "<NULL>"}
+        
         course_groups = {f"{track}_{track_detail}_{course}": group.sort_values('kaisai_start_datetime', ascending=False)
                         for (track, track_detail, course), group in data.groupby(['track_valid', 'track_detail_valid', 'course_valid'])
                         if track != "<NULL>" and track_detail != "<NULL>"}
@@ -786,7 +1005,7 @@ class HorguesDataset(Dataset):
             cutoff_start = race_datetime - np.timedelta64(self.max_prev_days, 'D')
             cutoff_end = race_datetime - np.timedelta64(self.hours_before_race, 'h')
 
-            # horse_weight_history
+            # horse_history
             for _, row in race_data.iterrows():
                 horse_idx = row['horse_idx']
                 horse_key = row['horse_id_valid']
@@ -797,10 +1016,171 @@ class HorguesDataset(Dataset):
                     if len(valid_history) > 0:
                         days_before = ((race_datetime - valid_history['kaisai_start_datetime']).dt.total_seconds() / 86400).astype(np.float32)
                         length = len(valid_history)
-                        self.built_data['sequence_data']['horse_weight_history']['x_num']['days_before'][race_idx, horse_idx, :length] = days_before
-                        self.built_data['sequence_data']['horse_weight_history']['x_num']['horse_weight'][race_idx, horse_idx, :length] = valid_history['horse_weight_numeric'].values
-                        self.built_data['sequence_data']['horse_weight_history']['x_num']['weight_change'][race_idx, horse_idx, :length] = valid_history['weight_change_numeric'].values
-                        self.built_data['sequence_data']['horse_weight_history']['mask'][race_idx, horse_idx, :length] = True
+                        self.built_data['sequence_data']['horse_history']['x_num']['days_before'][race_idx, horse_idx, :length] = days_before
+                        self.built_data['sequence_data']['horse_history']['x_num']['horse_weight'][race_idx, horse_idx, :length] = valid_history['horse_weight_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['weight_change'][race_idx, horse_idx, :length] = valid_history['weight_change_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['distance'][race_idx, horse_idx, :length] = valid_history['distance_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['race_number'][race_idx, horse_idx, :length] = valid_history['race_number_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['registration_count'][race_idx, horse_idx, :length] = valid_history['registration_count_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['horse_number'][race_idx, horse_idx, :length] = valid_history['horse_number_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['frame_number'][race_idx, horse_idx, :length] = valid_history['frame_number_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['horse_age'][race_idx, horse_idx, :length] = valid_history['horse_age_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['burden_weight'][race_idx, horse_idx, :length] = valid_history['burden_weight_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['finish_time'][race_idx, horse_idx, :length] = valid_history['finish_time_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['speed'][race_idx, horse_idx, :length] = valid_history['speed_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['last_3furlong'][race_idx, horse_idx, :length] = valid_history['last_3furlong_numeric'].values
+                        
+                        self.built_data['sequence_data']['horse_history']['x_cat']['horse_id'][race_idx, horse_idx, :length] = valid_history['horse_id_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['jockey_id'][race_idx, horse_idx, :length] = valid_history['jockey_id_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['track_detail'][race_idx, horse_idx, :length] = valid_history['track_detail_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['track_type'][race_idx, horse_idx, :length] = valid_history['track_type_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['weather'][race_idx, horse_idx, :length] = valid_history['weather_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['track_cond'][race_idx, horse_idx, :length] = valid_history['track_cond_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['grade'][race_idx, horse_idx, :length] = valid_history['grade_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['course'][race_idx, horse_idx, :length] = valid_history['course_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['sex'][race_idx, horse_idx, :length] = valid_history['sex_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['trainer_area'][race_idx, horse_idx, :length] = valid_history['trainer_area_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['trainer_id'][race_idx, horse_idx, :length] = valid_history['trainer_id_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['blinker_use'][race_idx, horse_idx, :length] = valid_history['blinker_use_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['jockey_sex'][race_idx, horse_idx, :length] = valid_history['jockey_sex_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['trainer_sex'][race_idx, horse_idx, :length] = valid_history['trainer_sex_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['pedigree_0'][race_idx, horse_idx, :length] = valid_history['pedigree_0_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['pedigree_1'][race_idx, horse_idx, :length] = valid_history['pedigree_1_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['pedigree_2'][race_idx, horse_idx, :length] = valid_history['pedigree_2_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['pedigree_3'][race_idx, horse_idx, :length] = valid_history['pedigree_3_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['pedigree_4'][race_idx, horse_idx, :length] = valid_history['pedigree_4_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['pedigree_5'][race_idx, horse_idx, :length] = valid_history['pedigree_5_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['pedigree_6'][race_idx, horse_idx, :length] = valid_history['pedigree_6_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['pedigree_7'][race_idx, horse_idx, :length] = valid_history['pedigree_7_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['pedigree_8'][race_idx, horse_idx, :length] = valid_history['pedigree_8_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['pedigree_9'][race_idx, horse_idx, :length] = valid_history['pedigree_9_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['pedigree_10'][race_idx, horse_idx, :length] = valid_history['pedigree_10_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['pedigree_11'][race_idx, horse_idx, :length] = valid_history['pedigree_11_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['pedigree_12'][race_idx, horse_idx, :length] = valid_history['pedigree_12_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['pedigree_13'][race_idx, horse_idx, :length] = valid_history['pedigree_13_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['track'][race_idx, horse_idx, :length] = valid_history['track_valid'].values
+                        self.built_data['sequence_data']['horse_history']['x_cat']['running_style'][race_idx, horse_idx, :length] = valid_history['running_style_valid'].values
+                        # self.built_data['sequence_data']['horse_history']['x_cat']['rival_horse_id'][race_idx, horse_idx, :length] = valid_history['rival_horse_id_valid'].values
+                        
+                        self.built_data['sequence_data']['horse_history']['mask'][race_idx, horse_idx, :length] = True
+
+            # jockey_history
+            for _, row in race_data.iterrows():
+                horse_idx = row['horse_idx']
+                jockey_key = row['jockey_id_valid']
+                if jockey_key in jockey_groups:
+                    history = jockey_groups[jockey_key]
+                    mask = (history['kaisai_start_datetime'] >= cutoff_start) & (history['kaisai_start_datetime'] < cutoff_end)
+                    valid_history = history[mask].head(self.max_hist_len)
+                    if len(valid_history) > 0:
+                        days_before = ((race_datetime - valid_history['kaisai_start_datetime']).dt.total_seconds() / 86400).astype(np.float32)
+                        length = len(valid_history)
+                        self.built_data['sequence_data']['jockey_history']['x_num']['days_before'][race_idx, horse_idx, :length] = days_before
+                        self.built_data['sequence_data']['jockey_history']['x_num']['horse_weight'][race_idx, horse_idx, :length] = valid_history['horse_weight_numeric'].values
+                        self.built_data['sequence_data']['jockey_history']['x_num']['weight_change'][race_idx, horse_idx, :length] = valid_history['weight_change_numeric'].values
+                        self.built_data['sequence_data']['jockey_history']['x_num']['distance'][race_idx, horse_idx, :length] = valid_history['distance_numeric'].values
+                        self.built_data['sequence_data']['jockey_history']['x_num']['race_number'][race_idx, horse_idx, :length] = valid_history['race_number_numeric'].values
+                        self.built_data['sequence_data']['jockey_history']['x_num']['registration_count'][race_idx, horse_idx, :length] = valid_history['registration_count_numeric'].values
+                        self.built_data['sequence_data']['jockey_history']['x_num']['horse_number'][race_idx, horse_idx, :length] = valid_history['horse_number_numeric'].values
+                        self.built_data['sequence_data']['jockey_history']['x_num']['frame_number'][race_idx, horse_idx, :length] = valid_history['frame_number_numeric'].values
+                        self.built_data['sequence_data']['jockey_history']['x_num']['horse_age'][race_idx, horse_idx, :length] = valid_history['horse_age_numeric'].values
+                        self.built_data['sequence_data']['jockey_history']['x_num']['burden_weight'][race_idx, horse_idx, :length] = valid_history['burden_weight_numeric'].values
+                        self.built_data['sequence_data']['jockey_history']['x_num']['finish_time'][race_idx, horse_idx, :length] = valid_history['finish_time_numeric'].values
+                        self.built_data['sequence_data']['jockey_history']['x_num']['speed'][race_idx, horse_idx, :length] = valid_history['speed_numeric'].values
+                        self.built_data['sequence_data']['jockey_history']['x_num']['last_3furlong'][race_idx, horse_idx, :length] = valid_history['last_3furlong_numeric'].values
+                        
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['horse_id'][race_idx, horse_idx, :length] = valid_history['horse_id_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['jockey_id'][race_idx, horse_idx, :length] = valid_history['jockey_id_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['track_detail'][race_idx, horse_idx, :length] = valid_history['track_detail_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['track_type'][race_idx, horse_idx, :length] = valid_history['track_type_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['weather'][race_idx, horse_idx, :length] = valid_history['weather_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['track_cond'][race_idx, horse_idx, :length] = valid_history['track_cond_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['grade'][race_idx, horse_idx, :length] = valid_history['grade_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['course'][race_idx, horse_idx, :length] = valid_history['course_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['sex'][race_idx, horse_idx, :length] = valid_history['sex_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['trainer_area'][race_idx, horse_idx, :length] = valid_history['trainer_area_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['trainer_id'][race_idx, horse_idx, :length] = valid_history['trainer_id_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['blinker_use'][race_idx, horse_idx, :length] = valid_history['blinker_use_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['jockey_sex'][race_idx, horse_idx, :length] = valid_history['jockey_sex_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['trainer_sex'][race_idx, horse_idx, :length] = valid_history['trainer_sex_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['pedigree_0'][race_idx, horse_idx, :length] = valid_history['pedigree_0_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['pedigree_1'][race_idx, horse_idx, :length] = valid_history['pedigree_1_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['pedigree_2'][race_idx, horse_idx, :length] = valid_history['pedigree_2_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['pedigree_3'][race_idx, horse_idx, :length] = valid_history['pedigree_3_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['pedigree_4'][race_idx, horse_idx, :length] = valid_history['pedigree_4_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['pedigree_5'][race_idx, horse_idx, :length] = valid_history['pedigree_5_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['pedigree_6'][race_idx, horse_idx, :length] = valid_history['pedigree_6_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['pedigree_7'][race_idx, horse_idx, :length] = valid_history['pedigree_7_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['pedigree_8'][race_idx, horse_idx, :length] = valid_history['pedigree_8_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['pedigree_9'][race_idx, horse_idx, :length] = valid_history['pedigree_9_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['pedigree_10'][race_idx, horse_idx, :length] = valid_history['pedigree_10_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['pedigree_11'][race_idx, horse_idx, :length] = valid_history['pedigree_11_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['pedigree_12'][race_idx, horse_idx, :length] = valid_history['pedigree_12_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['pedigree_13'][race_idx, horse_idx, :length] = valid_history['pedigree_13_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['track'][race_idx, horse_idx, :length] = valid_history['track_valid'].values
+                        self.built_data['sequence_data']['jockey_history']['x_cat']['running_style'][race_idx, horse_idx, :length] = valid_history['running_style_valid'].values
+                        # self.built_data['sequence_data']['jockey_history']['x_cat']['rival_horse_id'][race_idx, horse_idx, :length] = valid_history['rival_horse_id_valid'].values
+                        
+                        self.built_data['sequence_data']['jockey_history']['mask'][race_idx, horse_idx, :length] = True
+
+            # trainer_history
+            for _, row in race_data.iterrows():
+                horse_idx = row['horse_idx']
+                trainer_key = row['trainer_id_valid']
+                if trainer_key in trainer_groups:
+                    history = trainer_groups[trainer_key]
+                    mask = (history['kaisai_start_datetime'] >= cutoff_start) & (history['kaisai_start_datetime'] < cutoff_end)
+                    valid_history = history[mask].head(self.max_hist_len)
+                    if len(valid_history) > 0:
+                        days_before = ((race_datetime - valid_history['kaisai_start_datetime']).dt.total_seconds() / 86400).astype(np.float32)
+                        length = len(valid_history)
+                        self.built_data['sequence_data']['trainer_history']['x_num']['days_before'][race_idx, horse_idx, :length] = days_before
+                        self.built_data['sequence_data']['trainer_history']['x_num']['horse_weight'][race_idx, horse_idx, :length] = valid_history['horse_weight_numeric'].values
+                        self.built_data['sequence_data']['trainer_history']['x_num']['weight_change'][race_idx, horse_idx, :length] = valid_history['weight_change_numeric'].values
+                        self.built_data['sequence_data']['trainer_history']['x_num']['distance'][race_idx, horse_idx, :length] = valid_history['distance_numeric'].values
+                        self.built_data['sequence_data']['trainer_history']['x_num']['race_number'][race_idx, horse_idx, :length] = valid_history['race_number_numeric'].values
+                        self.built_data['sequence_data']['trainer_history']['x_num']['registration_count'][race_idx, horse_idx, :length] = valid_history['registration_count_numeric'].values
+                        self.built_data['sequence_data']['trainer_history']['x_num']['horse_number'][race_idx, horse_idx, :length] = valid_history['horse_number_numeric'].values
+                        self.built_data['sequence_data']['trainer_history']['x_num']['frame_number'][race_idx, horse_idx, :length] = valid_history['frame_number_numeric'].values
+                        self.built_data['sequence_data']['trainer_history']['x_num']['horse_age'][race_idx, horse_idx, :length] = valid_history['horse_age_numeric'].values
+                        self.built_data['sequence_data']['trainer_history']['x_num']['burden_weight'][race_idx, horse_idx, :length] = valid_history['burden_weight_numeric'].values
+                        self.built_data['sequence_data']['trainer_history']['x_num']['finish_time'][race_idx, horse_idx, :length] = valid_history['finish_time_numeric'].values
+                        self.built_data['sequence_data']['trainer_history']['x_num']['speed'][race_idx, horse_idx, :length] = valid_history['speed_numeric'].values
+                        self.built_data['sequence_data']['trainer_history']['x_num']['last_3furlong'][race_idx, horse_idx, :length] = valid_history['last_3furlong_numeric'].values
+                        
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['horse_id'][race_idx, horse_idx, :length] = valid_history['horse_id_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['jockey_id'][race_idx, horse_idx, :length] = valid_history['jockey_id_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['track_detail'][race_idx, horse_idx, :length] = valid_history['track_detail_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['track_type'][race_idx, horse_idx, :length] = valid_history['track_type_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['weather'][race_idx, horse_idx, :length] = valid_history['weather_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['track_cond'][race_idx, horse_idx, :length] = valid_history['track_cond_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['grade'][race_idx, horse_idx, :length] = valid_history['grade_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['course'][race_idx, horse_idx, :length] = valid_history['course_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['sex'][race_idx, horse_idx, :length] = valid_history['sex_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['trainer_area'][race_idx, horse_idx, :length] = valid_history['trainer_area_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['trainer_id'][race_idx, horse_idx, :length] = valid_history['trainer_id_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['blinker_use'][race_idx, horse_idx, :length] = valid_history['blinker_use_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['jockey_sex'][race_idx, horse_idx, :length] = valid_history['jockey_sex_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['trainer_sex'][race_idx, horse_idx, :length] = valid_history['trainer_sex_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['pedigree_0'][race_idx, horse_idx, :length] = valid_history['pedigree_0_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['pedigree_1'][race_idx, horse_idx, :length] = valid_history['pedigree_1_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['pedigree_2'][race_idx, horse_idx, :length] = valid_history['pedigree_2_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['pedigree_3'][race_idx, horse_idx, :length] = valid_history['pedigree_3_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['pedigree_4'][race_idx, horse_idx, :length] = valid_history['pedigree_4_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['pedigree_5'][race_idx, horse_idx, :length] = valid_history['pedigree_5_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['pedigree_6'][race_idx, horse_idx, :length] = valid_history['pedigree_6_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['pedigree_7'][race_idx, horse_idx, :length] = valid_history['pedigree_7_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['pedigree_8'][race_idx, horse_idx, :length] = valid_history['pedigree_8_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['pedigree_9'][race_idx, horse_idx, :length] = valid_history['pedigree_9_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['pedigree_10'][race_idx, horse_idx, :length] = valid_history['pedigree_10_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['pedigree_11'][race_idx, horse_idx, :length] = valid_history['pedigree_11_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['pedigree_12'][race_idx, horse_idx, :length] = valid_history['pedigree_12_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['pedigree_13'][race_idx, horse_idx, :length] = valid_history['pedigree_13_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['track'][race_idx, horse_idx, :length] = valid_history['track_valid'].values
+                        self.built_data['sequence_data']['trainer_history']['x_cat']['running_style'][race_idx, horse_idx, :length] = valid_history['running_style_valid'].values
+                        # self.built_data['sequence_data']['trainer_history']['x_cat']['rival_horse_id'][race_idx, horse_idx, :length] = valid_history['rival_horse_id_valid'].values
+
+                        self.built_data['sequence_data']['trainer_history']['mask'][race_idx, horse_idx, :length] = True
 
             # course_lap_time_history
             for _, row in race_data.iterrows():

@@ -78,6 +78,15 @@ class SoftBinnedLinear(nn.Module):
             init_range=init_range
         )
         self.linear = nn.Linear(num_bins, d_token)
+
+        self._init_weights()
+        
+    def _init_weights(self):
+        """重みの初期化"""
+        # Linearレイヤーの重み初期化 (Xavier uniform)
+        nn.init.xavier_uniform_(self.linear.weight)
+        if self.linear.bias is not None:
+            nn.init.constant_(self.linear.bias, 0)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -128,6 +137,21 @@ class FeatureTokenizer(nn.Module):
 
         self.norm = nn.LayerNorm(d_token)
         self.dropout = nn.Dropout(dropout)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """重みの初期化"""
+        # カテゴリ埋め込みの初期化
+        for embedding in self.categorical_tokenizers.values():
+            nn.init.normal_(embedding.weight, mean=0, std=0.02)
+            # padding_idxは0で固定
+            if embedding.padding_idx is not None:
+                nn.init.constant_(embedding.weight[embedding.padding_idx], 0)
+        
+        # LayerNormの初期化（通常はデフォルトで適切）
+        nn.init.constant_(self.norm.weight, 1.0)
+        nn.init.constant_(self.norm.bias, 0.0)
 
     def forward(self, x_num: Optional[Dict[str, torch.Tensor]] = None, 
                 x_cat: Optional[Dict[str, torch.Tensor]] = None):
@@ -183,6 +207,16 @@ class AttentionHead(nn.Module):
         self.k = nn.Linear(d_token, d_head)
         self.v = nn.Linear(d_token, d_head)
 
+        self._init_weights()
+
+    def _init_weights(self):
+        """重みの初期化"""
+        # Attention用の線形層の初期化 (Xavier uniform)
+        for linear in [self.q, self.k, self.v]:
+            nn.init.xavier_uniform_(linear.weight)
+            if linear.bias is not None:
+                nn.init.constant_(linear.bias, 0)
+
     def forward(self, x, mask=None):
         query = self.q(x)
         key = self.k(x)
@@ -214,6 +248,13 @@ class MultiHeadAttention(nn.Module):
         )
         self.output_linear = nn.Linear(d_token, d_token)
 
+    def _init_weights(self):
+        """重みの初期化"""
+        # 出力層の初期化
+        nn.init.xavier_uniform_(self.output_linear.weight)
+        if self.output_linear.bias is not None:
+            nn.init.constant_(self.output_linear.bias, 0)
+
     def forward(self, x, mask=None):
         x = torch.cat([h(x, mask) for h in self.heads], dim=-1)
         x = self.output_linear(x)
@@ -228,6 +269,19 @@ class FeedForward(nn.Module):
         self.linear2 = nn.Linear(d_ffn, d_token)
         self.gelu = nn.GELU()
         self.dropout = nn.Dropout(dropout)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """重みの初期化"""
+        # He初期化 (GELU活性化関数に適している)
+        nn.init.kaiming_normal_(self.linear1.weight, mode='fan_in', nonlinearity='relu')
+        nn.init.kaiming_normal_(self.linear2.weight, mode='fan_in', nonlinearity='relu')
+        
+        if self.linear1.bias is not None:
+            nn.init.constant_(self.linear1.bias, 0)
+        if self.linear2.bias is not None:
+            nn.init.constant_(self.linear2.bias, 0)
 
     def forward(self, x: torch.Tensor):
         x = self.linear1(x)
@@ -248,6 +302,15 @@ class TransformerBlock(nn.Module):
         self.norm2 = nn.LayerNorm(d_token)
         self.attention = MultiHeadAttention(d_token, n_heads, dropout)
         self.feed_forward = FeedForward(d_token, d_ffn, dropout)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """重みの初期化"""
+        # LayerNormの初期化
+        for norm in [self.norm1, self.norm2]:
+            nn.init.constant_(norm.weight, 1.0)
+            nn.init.constant_(norm.bias, 0.0)
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
         hidden_state = self.norm1(x)
@@ -278,6 +341,20 @@ class SequenceTransformer(nn.Module):
 
         self.norm = nn.LayerNorm(d_token)
         self.dropout = nn.Dropout(dropout)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """重みの初期化"""
+        # CLSトークンの初期化
+        nn.init.normal_(self.cls_token, mean=0, std=0.02)
+        
+        # 位置エンコーディングの初期化
+        nn.init.normal_(self.position_embeddings, mean=0, std=0.02)
+        
+        # LayerNormの初期化
+        nn.init.constant_(self.norm.weight, 1.0)
+        nn.init.constant_(self.norm.bias, 0.0)
 
     def forward(self, sequence_tokens: torch.Tensor, mask: Optional[torch.Tensor] = None):
         """
@@ -352,6 +429,19 @@ class RaceTransformer(nn.Module):
         # スコア計算ヘッド
         self.score_head = nn.Linear(d_token, 1)
 
+        self._init_weights()
+
+    def _init_weights(self):
+        """重みの初期化"""
+        # LayerNormの初期化
+        nn.init.constant_(self.norm.weight, 1.0)
+        nn.init.constant_(self.norm.bias, 0.0)
+        
+        # スコアヘッドの初期化（出力の分散を小さくする）
+        nn.init.xavier_uniform_(self.score_head.weight)
+        if self.score_head.bias is not None:
+            nn.init.constant_(self.score_head.bias, 0)
+
     def forward(self, horse_vectors: torch.Tensor, mask: Optional[torch.Tensor] = None):
         """
         Args:
@@ -390,20 +480,33 @@ class HorguesModel(nn.Module):
                  sequence_names: List[str],
                  feature_aliases: Dict[str, str],
                  dataset_params: Dict[str, Any],
-                 d_token: int = 192,
-                 num_bins: int = 10,
-                 binning_temperature: float = 1.0,
-                 binning_init_range: float = 3.0,
-                 ft_n_layers: int = 3,
+
+                 # 次元数
+                 d_token: int = 256,  # 競馬の複雑な特徴量関係を捉えるための十分な次元数
+
+                 # SoftBinning 設定
+                 num_bins: int = 8,  # 計算効率とモデル複雑性のバランス
+                 binning_temperature: float = 0.8,  # やや鋭い分布で特徴量の境界を明確化
+                 binning_init_range: float = 2.5,  # 標準化データの99%をカバーする範囲
+
+                 # 特徴量統合Transformer (軽量化)
+                 ft_n_layers: int = 2,
                  ft_n_heads: int = 8,
-                 ft_d_ffn: int = None,
+                 ft_d_ffn: int = 512,
+
+                 # 時系列統合Transformer (中程度の複雑性)
                  seq_n_layers: int = 3,
                  seq_n_heads: int = 8,
-                 seq_d_ffn: int = None,
-                 race_n_layers: int = 3,
+                 seq_d_ffn: int = 768,  # d_token * 3
+
+                 # レース内相互作用Transformer (重要度高)
+                 race_n_layers: int = 4,
                  race_n_heads: int = 8,
-                 race_d_ffn: int = None,
-                 dropout: float = 0.3,
+                 race_d_ffn: int = 1024,  # d_token * 4
+
+                 # 過学習防止
+                 dropout: float = 0.1,  # 標準的なドロップアウト数
+                 
                  max_horses: int = 18):
         super().__init__()
         self.sequence_names = sequence_names
