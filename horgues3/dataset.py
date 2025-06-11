@@ -722,6 +722,10 @@ class HorguesDataset(Dataset):
                         "finish_time": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                         "speed": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                         "last_3furlong": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "relative_horse_weight": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "relative_burden_weight": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "distance_change": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "rest_days": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                     },
                     "x_cat": {
                         'horse_id': np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
@@ -773,6 +777,10 @@ class HorguesDataset(Dataset):
                         "finish_time": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                         "speed": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                         "last_3furlong": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "relative_horse_weight": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "relative_burden_weight": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "distance_change": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "rest_days": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                     },
                     "x_cat": {
                         "horse_id": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
@@ -824,6 +832,10 @@ class HorguesDataset(Dataset):
                         "finish_time": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                         "speed": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                         "last_3furlong": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "relative_horse_weight": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "relative_burden_weight": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "distance_change": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
+                        "rest_days": np.full((num_races, self.max_horses, self.max_hist_len), np.nan, dtype=np.float32),
                     },
                     "x_cat": {
                         "horse_id": np.full((num_races, self.max_horses, self.max_hist_len), "<NULL>", dtype=object),
@@ -1029,6 +1041,10 @@ class HorguesDataset(Dataset):
                         self.built_data['sequence_data']['horse_history']['x_num']['finish_time'][race_idx, horse_idx, :length] = valid_history['finish_time_numeric'].values
                         self.built_data['sequence_data']['horse_history']['x_num']['speed'][race_idx, horse_idx, :length] = valid_history['speed_numeric'].values
                         self.built_data['sequence_data']['horse_history']['x_num']['last_3furlong'][race_idx, horse_idx, :length] = valid_history['last_3furlong_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['relative_horse_weight'][race_idx, horse_idx, :length] = valid_history['relative_horse_weight_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['relative_burden_weight'][race_idx, horse_idx, :length] = valid_history['relative_burden_weight_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['distance_change'][race_idx, horse_idx, :length] = valid_history['distance_change_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['rest_days'][race_idx, horse_idx, :length] = valid_history['rest_days_numeric'].values
                         
                         self.built_data['sequence_data']['horse_history']['x_cat']['horse_id'][race_idx, horse_idx, :length] = valid_history['horse_id_valid'].values
                         self.built_data['sequence_data']['horse_history']['x_cat']['jockey_id'][race_idx, horse_idx, :length] = valid_history['jockey_id_valid'].values
@@ -1088,6 +1104,10 @@ class HorguesDataset(Dataset):
                         self.built_data['sequence_data']['jockey_history']['x_num']['finish_time'][race_idx, horse_idx, :length] = valid_history['finish_time_numeric'].values
                         self.built_data['sequence_data']['jockey_history']['x_num']['speed'][race_idx, horse_idx, :length] = valid_history['speed_numeric'].values
                         self.built_data['sequence_data']['jockey_history']['x_num']['last_3furlong'][race_idx, horse_idx, :length] = valid_history['last_3furlong_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['relative_horse_weight'][race_idx, horse_idx, :length] = valid_history['relative_horse_weight_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['relative_burden_weight'][race_idx, horse_idx, :length] = valid_history['relative_burden_weight_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['distance_change'][race_idx, horse_idx, :length] = valid_history['distance_change_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['rest_days'][race_idx, horse_idx, :length] = valid_history['rest_days_numeric'].values
                         
                         self.built_data['sequence_data']['jockey_history']['x_cat']['horse_id'][race_idx, horse_idx, :length] = valid_history['horse_id_valid'].values
                         self.built_data['sequence_data']['jockey_history']['x_cat']['jockey_id'][race_idx, horse_idx, :length] = valid_history['jockey_id_valid'].values
@@ -1147,6 +1167,10 @@ class HorguesDataset(Dataset):
                         self.built_data['sequence_data']['trainer_history']['x_num']['finish_time'][race_idx, horse_idx, :length] = valid_history['finish_time_numeric'].values
                         self.built_data['sequence_data']['trainer_history']['x_num']['speed'][race_idx, horse_idx, :length] = valid_history['speed_numeric'].values
                         self.built_data['sequence_data']['trainer_history']['x_num']['last_3furlong'][race_idx, horse_idx, :length] = valid_history['last_3furlong_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['relative_horse_weight'][race_idx, horse_idx, :length] = valid_history['relative_horse_weight_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['relative_burden_weight'][race_idx, horse_idx, :length] = valid_history['relative_burden_weight_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['distance_change'][race_idx, horse_idx, :length] = valid_history['distance_change_numeric'].values
+                        self.built_data['sequence_data']['horse_history']['x_num']['rest_days'][race_idx, horse_idx, :length] = valid_history['rest_days_numeric'].values
                         
                         self.built_data['sequence_data']['trainer_history']['x_cat']['horse_id'][race_idx, horse_idx, :length] = valid_history['horse_id_valid'].values
                         self.built_data['sequence_data']['trainer_history']['x_cat']['jockey_id'][race_idx, horse_idx, :length] = valid_history['jockey_id_valid'].values
