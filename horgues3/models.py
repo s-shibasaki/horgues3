@@ -482,7 +482,7 @@ class HorguesModel(nn.Module):
                  dataset_params: Dict[str, Any],
 
                  # 次元数
-                 d_token: int = 256,  # 競馬の複雑な特徴量関係を捉えるための十分な次元数
+                 d_token: int = 768,  # 競馬の複雑な特徴量関係を捉えるための十分な次元数
 
                  # SoftBinning 設定
                  num_bins: int = 8,  # 計算効率とモデル複雑性のバランス
@@ -491,21 +491,21 @@ class HorguesModel(nn.Module):
 
                  # 特徴量統合Transformer (軽量化)
                  ft_n_layers: int = 2,
-                 ft_n_heads: int = 8,
-                 ft_d_ffn: int = 512,
+                 ft_n_heads: int = 12,
+                 ft_d_ffn: int = 1536,
 
                  # 時系列統合Transformer (中程度の複雑性)
                  seq_n_layers: int = 3,
-                 seq_n_heads: int = 8,
-                 seq_d_ffn: int = 768,  # d_token * 3
+                 seq_n_heads: int = 12,
+                 seq_d_ffn: int = 2304,  # d_token * 3
 
                  # レース内相互作用Transformer (重要度高)
                  race_n_layers: int = 4,
-                 race_n_heads: int = 8,
-                 race_d_ffn: int = 1024,  # d_token * 4
+                 race_n_heads: int = 12,
+                 race_d_ffn: int = 3072,  # d_token * 4
 
                  # 過学習防止
-                 dropout: float = 0.1,  # 標準的なドロップアウト数
+                 dropout: float = 0.5,
                  
                  max_horses: int = 18):
         super().__init__()

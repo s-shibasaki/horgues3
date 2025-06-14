@@ -60,7 +60,7 @@ namespace JVDataCollector
         private readonly List<RecordDefinition> recordDefinitions = new List<RecordDefinition>();
         private readonly Dictionary<string, Dictionary<string, Dictionary<string, Object>>> buffers = new Dictionary<string, Dictionary<string, Dictionary<string, Object>>>();
         private readonly List<TableMetaData> tableMetaData = new List<TableMetaData>();
-        private const int batchSize = 50000;
+        private const int batchSize = 10000;
         private const string sid = "SA000000/SD000004";
 
         public JVLinkForm(string[] args)
@@ -4396,6 +4396,417 @@ namespace JVDataCollector
                     CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
                 });
 
+            // 出走別着度数レコード定義
+            recordDefinitions.Add(
+                new RecordDefinition
+                {
+                    RecordTypeId = "CK",
+                    Table = new TableDefinition
+                    {
+                        Name = "horse_race_performance",
+                        Comment = "出走別着度数レコード: 競走馬の詳細な成績統計と関連人物情報",
+                        Fields = CreateHorseRacePerformanceFields()
+                    },
+                    CreationDateField = new FieldDefinition { Position = 4, Length = 8 }
+                });
+
+            // ...existing code...
+        }
+
+        // 出走別着度数レコードのフィールド定義作成メソッド
+        private List<FieldDefinition> CreateHorseRacePerformanceFields()
+        {
+            var fields = new List<FieldDefinition>
+            {
+                new NormalFieldDefinition { Position = 1, Name = "record_type_id", Length = 2, IsPrimaryKey = false, Comment = "レコード種別ID: 'CK' をセット" },
+                new NormalFieldDefinition { Position = 3, Name = "data_kubun", Length = 1, IsPrimaryKey = false, Comment = "データ区分: 1:新規登録 2:更新 0:該当レコード削除(提供ミスなどの理由による)" },
+                new NormalFieldDefinition { Position = 4, Name = "data_creation_date", Length = 8, IsPrimaryKey = false, Comment = "データ作成年月日: 西暦4桁＋月日各2桁 yyyymmdd 形式" },
+                new NormalFieldDefinition { Position = 12, Name = "kaisai_year", Length = 4, IsPrimaryKey = true, Comment = "開催年: 該当レース施行年 西暦4桁 yyyy形式" },
+                new NormalFieldDefinition { Position = 16, Name = "kaisai_month_day", Length = 4, IsPrimaryKey = true, Comment = "開催月日: 該当レース施行月日 各2桁 mmdd形式" },
+                new NormalFieldDefinition { Position = 20, Name = "track_code", Length = 2, IsPrimaryKey = true, Comment = "競馬場コード: 該当レース施行競馬場 <コード表 2001.競馬場コード>参照" },
+                new NormalFieldDefinition { Position = 22, Name = "kaisai_kai", Length = 2, IsPrimaryKey = true, Comment = "開催回[第N回]: 該当レース施行回 その競馬場でその年の何回目の開催かを示す" },
+                new NormalFieldDefinition { Position = 24, Name = "kaisai_day", Length = 2, IsPrimaryKey = true, Comment = "開催日目[N日目]: 該当レース施行日目 そのレース施行回で何日目の開催かを示す" },
+                new NormalFieldDefinition { Position = 26, Name = "race_number", Length = 2, IsPrimaryKey = true, Comment = "レース番号: 該当レース番号" },
+                new NormalFieldDefinition { Position = 28, Name = "blood_registration_number", Length = 10, IsPrimaryKey = true, Comment = "血統登録番号: 生年(西暦)4桁＋1＋数字5桁" },
+                new NormalFieldDefinition { Position = 38, Name = "horse_name", Length = 36, IsPrimaryKey = false, Comment = "馬名: 通常全角18文字" },
+                new NormalFieldDefinition { Position = 74, Name = "flat_main_prize_total", Length = 9, IsPrimaryKey = false, Comment = "平地本賞金累計: 単位：百円（中央の平地本賞金の合計）" },
+                new NormalFieldDefinition { Position = 83, Name = "obstacle_main_prize_total", Length = 9, IsPrimaryKey = false, Comment = "障害本賞金累計: 単位：百円（中央の障害本賞金の合計）" },
+                new NormalFieldDefinition { Position = 92, Name = "flat_additional_prize_total", Length = 9, IsPrimaryKey = false, Comment = "平地付加賞金累計: 単位：百円（中央の平地付加賞金の合計）" },
+                new NormalFieldDefinition { Position = 101, Name = "obstacle_additional_prize_total", Length = 9, IsPrimaryKey = false, Comment = "障害付加賞金累計: 単位：百円（中央の障害付加賞金の合計）" },
+                new NormalFieldDefinition { Position = 110, Name = "flat_acquired_prize_total", Length = 9, IsPrimaryKey = false, Comment = "平地収得賞金累計: 単位：百円（中央＋中央以外の平地累積収得賞金）" },
+                new NormalFieldDefinition { Position = 119, Name = "obstacle_acquired_prize_total", Length = 9, IsPrimaryKey = false, Comment = "障害収得賞金累計: 単位：百円（中央＋中央以外の障害累積収得賞金）" }
+            };
+
+            // 着回数系のフィールドを追加
+            fields.AddRange(CreateResultCountFields());
+
+            // 騎手情報を追加
+            fields.AddRange(CreateJockeyInfoFields());
+
+            // 調教師情報を追加
+            fields.AddRange(CreateTrainerInfoFields());
+
+            // 馬主情報を追加
+            fields.AddRange(CreateOwnerInfoFields());
+
+            // 生産者情報を追加
+            fields.AddRange(CreateBreederInfoFields());
+
+            return fields;
+        }
+
+        // 着回数系フィールド作成メソッド
+        private List<FieldDefinition> CreateResultCountFields()
+        {
+            var fields = new List<FieldDefinition>();
+
+            // 総合着回数
+            fields.Add(CreateResultCountRepeatField(128, "total_results", "総合着回数: 1着～5着及び着外(6着以下)の回数（中央＋地方＋海外）"));
+
+            // 中央合計着回数
+            fields.Add(CreateResultCountRepeatField(146, "central_total_results", "中央合計着回数: 1着～5着及び着外(6着以下)の回数（中央のみ）"));
+
+            // 馬場別着回数
+            fields.Add(CreateResultCountRepeatField(164, "turf_straight_results", "芝直・着回数: 芝・直線コースでの1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(182, "turf_right_results", "芝右・着回数: 芝・右回りコースでの1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(200, "turf_left_results", "芝左・着回数: 芝・左回りコースでの1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(218, "dirt_straight_results", "ダ直・着回数: ダート・直線コースでの1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(236, "dirt_right_results", "ダ右・着回数: ダート・右回りコースでの1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(254, "dirt_left_results", "ダ左・着回数: ダート・左回りコースでの1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(272, "obstacle_results", "障害・着回数: 障害レースでの1着～5着及び着外(6着以下)の回数（中央のみ）"));
+
+            // 馬場状態別着回数
+            fields.Add(CreateResultCountRepeatField(290, "turf_firm_results", "芝良・着回数: 芝・良馬場での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(308, "turf_good_results", "芝稍・着回数: 芝・稍重馬場での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(326, "turf_yielding_results", "芝重・着回数: 芝・重馬場での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(344, "turf_soft_results", "芝不・着回数: 芝・不良馬場での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(362, "dirt_firm_results", "ダ良・着回数: ダート・良馬場での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(380, "dirt_good_results", "ダ稍・着回数: ダート・稍重馬場での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(398, "dirt_yielding_results", "ダ重・着回数: ダート・重馬場での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(416, "dirt_soft_results", "ダ不・着回数: ダート・不良馬場での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(434, "obstacle_firm_results", "障良・着回数: 障害レース・良馬場での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(452, "obstacle_good_results", "障稍・着回数: 障害レース・稍重馬場での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(470, "obstacle_yielding_results", "障重・着回数: 障害レース・重馬場での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(488, "obstacle_soft_results", "障不・着回数: 障害レース・不良馬場での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+
+            // 距離別着回数（芝）
+            fields.Add(CreateResultCountRepeatField(506, "turf_1200_below_results", "芝1200以下・着回数: 芝･1200M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(524, "turf_1201_1400_results", "芝1201-1400・着回数: 芝･1201Ｍ以上1400M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(542, "turf_1401_1600_results", "芝1401-1600・着回数: 芝･1401Ｍ以上1600M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(560, "turf_1601_1800_results", "芝1601-1800・着回数: 芝･1601Ｍ以上1800M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(578, "turf_1801_2000_results", "芝1801-2000・着回数: 芝･1801Ｍ以上2000M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(596, "turf_2001_2200_results", "芝2001-2200・着回数: 芝･2001Ｍ以上2200M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(614, "turf_2201_2400_results", "芝2201-2400・着回数: 芝･2201Ｍ以上2400M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(632, "turf_2401_2800_results", "芝2401-2800・着回数: 芝･2401Ｍ以上2800M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(650, "turf_2801_above_results", "芝2801以上・着回数: 芝･2801Ｍ以上での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+
+            // 距離別着回数（ダート）
+            fields.Add(CreateResultCountRepeatField(668, "dirt_1200_below_results", "ダ1200以下・着回数: ダート･1200M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(686, "dirt_1201_1400_results", "ダ1201-1400・着回数: ダート･1201Ｍ以上1400M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(704, "dirt_1401_1600_results", "ダ1401-1600・着回数: ダート･1401Ｍ以上1600M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(722, "dirt_1601_1800_results", "ダ1601-1800・着回数: ダート･1601Ｍ以上1800M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(740, "dirt_1801_2000_results", "ダ1801-2000・着回数: ダート･1801Ｍ以上2000M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(758, "dirt_2001_2200_results", "ダ2001-2200・着回数: ダート･2001Ｍ以上2200M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(776, "dirt_2201_2400_results", "ダ2201-2400・着回数: ダート･2201Ｍ以上2400M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(794, "dirt_2401_2800_results", "ダ2401-2800・着回数: ダート･2401Ｍ以上2800M以下での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+            fields.Add(CreateResultCountRepeatField(812, "dirt_2801_above_results", "ダ2801以上・着回数: ダート･2801Ｍ以上での1着～5着及び着外(6着以下)の回数（中央のみ）"));
+
+            // 競馬場別着回数（芝）
+            fields.Add(CreateResultCountRepeatField(830, "sapporo_turf_results", "札幌芝・着回数: 札幌・芝での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(848, "hakodate_turf_results", "函館芝・着回数: 函館・芝での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(866, "fukushima_turf_results", "福島芝・着回数: 福島・芝での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(884, "niigata_turf_results", "新潟芝・着回数: 新潟・芝での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(902, "tokyo_turf_results", "東京芝・着回数: 東京・芝での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(920, "nakayama_turf_results", "中山芝・着回数: 中山・芝での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(938, "chukyo_turf_results", "中京芝・着回数: 中京・芝での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(956, "kyoto_turf_results", "京都芝・着回数: 京都・芝での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(974, "hanshin_turf_results", "阪神芝・着回数: 阪神・芝での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(992, "kokura_turf_results", "小倉芝・着回数: 小倉・芝での1着～5着及び着外(6着以下)の回数"));
+
+            // 競馬場別着回数（ダート）
+            fields.Add(CreateResultCountRepeatField(1010, "sapporo_dirt_results", "札幌ダ・着回数: 札幌・ダートでの1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1028, "hakodate_dirt_results", "函館ダ・着回数: 函館・ダートでの1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1046, "fukushima_dirt_results", "福島ダ・着回数: 福島・ダートでの1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1064, "niigata_dirt_results", "新潟ダ・着回数: 新潟・ダートでの1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1082, "tokyo_dirt_results", "東京ダ・着回数: 東京・ダートでの1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1100, "nakayama_dirt_results", "中山ダ・着回数: 中山・ダートでの1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1118, "chukyo_dirt_results", "中京ダ・着回数: 中京・ダートでの1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1136, "kyoto_dirt_results", "京都ダ・着回数: 京都・ダートでの1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1154, "hanshin_dirt_results", "阪神ダ・着回数: 阪神・ダートでの1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1172, "kokura_dirt_results", "小倉ダ・着回数: 小倉・ダートでの1着～5着及び着外(6着以下)の回数"));
+
+            // 競馬場別着回数（障害）
+            fields.Add(CreateResultCountRepeatField(1190, "sapporo_obstacle_results", "札幌障・着回数: 札幌・障害での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1208, "hakodate_obstacle_results", "函館障・着回数: 函館・障害での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1226, "fukushima_obstacle_results", "福島障・着回数: 福島・障害での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1244, "niigata_obstacle_results", "新潟障・着回数: 新潟・障害での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1262, "tokyo_obstacle_results", "東京障・着回数: 東京・障害での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1280, "nakayama_obstacle_results", "中山障・着回数: 中山・障害での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1298, "chukyo_obstacle_results", "中京障・着回数: 中京・障害での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1316, "kyoto_obstacle_results", "京都障・着回数: 京都・障害での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1334, "hanshin_obstacle_results", "阪神障・着回数: 阪神・障害での1着～5着及び着外(6着以下)の回数"));
+            fields.Add(CreateResultCountRepeatField(1352, "kokura_obstacle_results", "小倉障・着回数: 小倉・障害での1着～5着及び着外(6着以下)の回数"));
+
+            // 脚質傾向と登録レース数
+            fields.Add(CreateRunningStyleRepeatField(1370, "running_style_tendency", "脚質傾向: 逃げ回数、先行回数、差し回数、追込回数を設定 過去出走レースの脚質を判定しカウントしたもの(中央レースのみ)"));
+            fields.Add(new NormalFieldDefinition { Position = 1382, Name = "registered_race_count", Length = 3, IsPrimaryKey = false, Comment = "登録レース数: JRA-VANに登録されている成績レース数" });
+
+            return fields;
+        }
+
+        // 着回数繰り返しフィールド作成ヘルパーメソッド
+        private RepeatFieldDefinition CreateResultCountRepeatField(int position, string tableName, string comment)
+        {
+            return new RepeatFieldDefinition
+            {
+                Position = position,
+                RepeatCount = 6,
+                Length = 3,
+                Table = new TableDefinition
+                {
+                    Name = tableName,
+                    Comment = comment,
+                    Fields = new List<FieldDefinition>
+        {
+            new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 3, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+        }
+                }
+            };
+        }
+
+        // 脚質傾向繰り返しフィールド作成ヘルパーメソッド
+        private RepeatFieldDefinition CreateRunningStyleRepeatField(int position, string tableName, string comment)
+        {
+            return new RepeatFieldDefinition
+            {
+                Position = position,
+                RepeatCount = 4,
+                Length = 3,
+                Table = new TableDefinition
+                {
+                    Name = tableName,
+                    Comment = comment,
+                    Fields = new List<FieldDefinition>
+        {
+            new NormalFieldDefinition { Position = 1, Name = "style_count", Length = 3, IsPrimaryKey = false, Comment = "脚質回数: 逃げ、先行、差し、追込の順" }
+        }
+                }
+            };
+        }
+
+        // 騎手情報フィールド作成メソッド
+        private List<FieldDefinition> CreateJockeyInfoFields()
+        {
+            return new List<FieldDefinition>
+            {
+                new NormalFieldDefinition { Position = 1385, Name = "jockey_code", Length = 5, IsPrimaryKey = false, Comment = "騎手コード" },
+                new NormalFieldDefinition { Position = 1390, Name = "jockey_name", Length = 34, IsPrimaryKey = false, Comment = "騎手名: 全角17文字　姓＋全角空白1文字＋名　外国人の場合は連続17文字" },
+                CreateJockeyPerformanceRepeatField(1424, "jockey_performance_info", "騎手本年･累計成績情報: 本年・累計の順に設定")
+            };
+        }
+
+        // 調教師情報フィールド作成メソッド
+        private List<FieldDefinition> CreateTrainerInfoFields()
+        {
+            return new List<FieldDefinition>
+            {
+                new NormalFieldDefinition { Position = 3864, Name = "trainer_code", Length = 5, IsPrimaryKey = false, Comment = "調教師コード" },
+                new NormalFieldDefinition { Position = 3869, Name = "trainer_name", Length = 34, IsPrimaryKey = false, Comment = "調教師名: 全角17文字　姓＋全角空白1文字＋名　外国人の場合は連続17文字" },
+                CreateTrainerPerformanceRepeatField(3903, "trainer_performance_info", "調教師本年･累計成績情報: 本年・累計の順に設定")
+            };
+        }
+
+        // 馬主情報フィールド作成メソッド
+        private List<FieldDefinition> CreateOwnerInfoFields()
+        {
+            return new List<FieldDefinition>
+            {
+                new NormalFieldDefinition { Position = 6343, Name = "owner_code", Length = 6, IsPrimaryKey = false, Comment = "馬主コード" },
+                new NormalFieldDefinition { Position = 6349, Name = "owner_name_with_corp", Length = 64, IsPrimaryKey = false, Comment = "馬主名(法人格有): 全角32文字 ～ 半角64文字 （全角と半角が混在）外国馬主の場合は、8.馬主名欧字の頭64バイトを設定" },
+                new NormalFieldDefinition { Position = 6413, Name = "owner_name_no_corp", Length = 64, IsPrimaryKey = false, Comment = "馬主名(法人格無): 全角32文字 ～ 半角64文字 （全角と半角が混在）株式会社、有限会社などの法人格を示す文字列が頭もしくは末尾にある場合にそれを削除したものを設定" },
+                CreateOwnerPerformanceRepeatField(6477, "owner_performance_info", "馬主本年･累計成績情報: 本年・累計の順に設定")
+            };
+        }
+
+        // 生産者情報フィールド作成メソッド
+        private List<FieldDefinition> CreateBreederInfoFields()
+        {
+            return new List<FieldDefinition>
+            {
+                new NormalFieldDefinition { Position = 6597, Name = "breeder_code", Length = 8, IsPrimaryKey = false, Comment = "生産者コード" },
+                new NormalFieldDefinition { Position = 6605, Name = "breeder_name_with_corp", Length = 72, IsPrimaryKey = false, Comment = "生産者名(法人格有): 全角36文字 ～ 半角72文字 （全角と半角が混在）外国生産者の場合は、8.生産者名欧字の頭70バイトを設定" },
+                new NormalFieldDefinition { Position = 6677, Name = "breeder_name_no_corp", Length = 72, IsPrimaryKey = false, Comment = "生産者名(法人格無): 全角36文字 ～ 半角72文字 （全角と半角が混在）株式会社、有限会社などの法人格を示す文字列が頭もしくは末尾にある場合にそれを削除したものを設定" },
+                CreateBreederPerformanceRepeatField(6749, "breeder_performance_info", "生産者本年･累計成績情報: 本年・累計の順に設定")
+            };
+        }
+
+        // 騎手成績情報繰り返しフィールド作成ヘルパーメソッド
+        private RepeatFieldDefinition CreateJockeyPerformanceRepeatField(int position, string tableName, string comment)
+        {
+            var fields = new List<FieldDefinition>
+            {
+                new NormalFieldDefinition { Position = 1, Name = "target_year", Length = 4, IsPrimaryKey = false, Comment = "設定年: 成績情報に設定されている年度(西暦)" },
+                new NormalFieldDefinition { Position = 5, Name = "flat_main_prize_total", Length = 10, IsPrimaryKey = false, Comment = "平地本賞金合計: 単位：百円（中央の平地本賞金の合計）" },
+                new NormalFieldDefinition { Position = 15, Name = "obstacle_main_prize_total", Length = 10, IsPrimaryKey = false, Comment = "障害本賞金合計: 単位：百円（中央の障害本賞金の合計）" },
+                new NormalFieldDefinition { Position = 25, Name = "flat_additional_prize_total", Length = 10, IsPrimaryKey = false, Comment = "平地付加賞金合計: 単位：百円（中央の平地付加賞金の合計）" },
+                new NormalFieldDefinition { Position = 35, Name = "obstacle_additional_prize_total", Length = 10, IsPrimaryKey = false, Comment = "障害付加賞金合計: 単位：百円（中央の障害付加賞金の合計）" }
+            };
+
+            // 各種着回数を追加（仕様に従って詳細に追加）
+            fields.AddRange(CreateDetailedJockeyResultFields());
+
+            return new RepeatFieldDefinition
+            {
+                Position = position,
+                RepeatCount = 2,
+                Length = 1220,
+                Table = new TableDefinition
+                {
+                    Name = tableName,
+                    Comment = comment,
+                    Fields = fields
+                }
+            };
+        }
+
+        // 調教師成績情報繰り返しフィールド作成ヘルパーメソッド
+        private RepeatFieldDefinition CreateTrainerPerformanceRepeatField(int position, string tableName, string comment)
+        {
+            return CreateJockeyPerformanceRepeatField(position, tableName, comment); // 構造が同じため再利用
+        }
+
+        // 馬主成績情報繰り返しフィールド作成ヘルパーメソッド
+        private RepeatFieldDefinition CreateOwnerPerformanceRepeatField(int position, string tableName, string comment)
+        {
+            return new RepeatFieldDefinition
+            {
+                Position = position,
+                RepeatCount = 2,
+                Length = 60,
+                Table = new TableDefinition
+                {
+                    Name = tableName,
+                    Comment = comment,
+                    Fields = new List<FieldDefinition>
+                    {
+                        new NormalFieldDefinition { Position = 1, Name = "target_year", Length = 4, IsPrimaryKey = false, Comment = "設定年: 成績情報に設定されている年度(西暦)" },
+                        new NormalFieldDefinition { Position = 5, Name = "main_prize_total", Length = 10, IsPrimaryKey = false, Comment = "本賞金合計: 単位：百円（中央の本賞金の合計）" },
+                        new NormalFieldDefinition { Position = 15, Name = "additional_prize_total", Length = 10, IsPrimaryKey = false, Comment = "付加賞金合計: 単位：百円（中央の付加賞金の合計）" },
+                        new RepeatFieldDefinition
+                        {
+                            Position = 25,
+                            RepeatCount = 6,
+                            Length = 6,
+                            Table = new TableDefinition
+                            {
+                                Name = "results",
+                                Comment = "着回数: 1着～5着及び着外(6着以下)の回数（中央のみ）",
+                                Fields = new List<FieldDefinition>
+                                {
+                                    new NormalFieldDefinition { Position = 1, Name = "result_count", Length = 6, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+        }
+
+        // 生産者成績情報繰り返しフィールド作成ヘルパーメソッド
+        private RepeatFieldDefinition CreateBreederPerformanceRepeatField(int position, string tableName, string comment)
+        {
+            return CreateOwnerPerformanceRepeatField(position, tableName, comment); // 構造が同じため再利用
+        }
+
+        // 騎手・調教師の詳細成績フィールド作成メソッド
+        private List<FieldDefinition> CreateDetailedJockeyResultFields()
+        {
+            var fields = new List<FieldDefinition>();
+
+            // 基本成績（芝、ダート、障害）
+            fields.Add(CreatePerformanceRepeatField(45, "turf_results", "芝着回数: 1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 5));
+            fields.Add(CreatePerformanceRepeatField(75, "dirt_results", "ダート着回数: 1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 5));
+            fields.Add(CreatePerformanceRepeatField(105, "obstacle_results", "障害着回数: 1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+
+            // 距離別成績（芝）
+            fields.Add(CreatePerformanceRepeatField(129, "turf_1200_below_results", "芝1200以下・着回数: 芝･1200M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(153, "turf_1201_1400_results", "芝1201-1400・着回数: 芝･1201Ｍ以上1400M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(177, "turf_1401_1600_results", "芝1401-1600・着回数: 芝･1401Ｍ以上1600M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(201, "turf_1601_1800_results", "芝1601-1800・着回数: 芝･1601Ｍ以上1800M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(225, "turf_1801_2000_results", "芝1801-2000・着回数: 芝･1801Ｍ以上2000M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(249, "turf_2001_2200_results", "芝2001-2200・着回数: 芝･2001Ｍ以上2200M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(273, "turf_2201_2400_results", "芝2201-2400・着回数: 芝･2201Ｍ以上2400M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(297, "turf_2401_2800_results", "芝2401-2800・着回数: 芝･2401Ｍ以上2800M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(321, "turf_2801_above_results", "芝2801以上・着回数: 芝･2801Ｍ以上での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+
+            // 距離別成績（ダート）
+            fields.Add(CreatePerformanceRepeatField(345, "dirt_1200_below_results", "ダ1200以下・着回数: ダート･1200M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(369, "dirt_1201_1400_results", "ダ1201-1400・着回数: ダート･1201Ｍ以上1400M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(393, "dirt_1401_1600_results", "ダ1401-1600・着回数: ダート･1401Ｍ以上1600M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(417, "dirt_1601_1800_results", "ダ1601-1800・着回数: ダート･1601Ｍ以上1800M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(441, "dirt_1801_2000_results", "ダ1801-2000・着回数: ダート･1801Ｍ以上2000M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(465, "dirt_2001_2200_results", "ダ2001-2200・着回数: ダート･2001Ｍ以上2200M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(489, "dirt_2201_2400_results", "ダ2201-2400・着回数: ダート･2201Ｍ以上2400M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(513, "dirt_2401_2800_results", "ダ2401-2800・着回数: ダート･2401Ｍ以上2800M以下での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(537, "dirt_2801_above_results", "ダ2801以上・着回数: ダート･2801Ｍ以上での1着～5着及び着外(6着以下)の回数（中央のみ）", 6, 4));
+
+            // 競馬場別成績（芝）
+            fields.Add(CreatePerformanceRepeatField(561, "sapporo_turf_results", "札幌芝・着回数: 札幌・芝での1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(585, "hakodate_turf_results", "函館芝・着回数: 函館・芝での1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(609, "fukushima_turf_results", "福島芝・着回数: 福島・芝での1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(633, "niigata_turf_results", "新潟芝・着回数: 新潟・芝での1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(657, "tokyo_turf_results", "東京芝・着回数: 東京・芝での1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(681, "nakayama_turf_results", "中山芝・着回数: 中山・芝での1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(705, "chukyo_turf_results", "中京芝・着回数: 中京・芝での1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(729, "kyoto_turf_results", "京都芝・着回数: 京都・芝での1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(753, "hanshin_turf_results", "阪神芝・着回数: 阪神・芝での1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(777, "kokura_turf_results", "小倉芝・着回数: 小倉・芝での1着～5着及び着外(6着以下)の回数", 6, 4));
+
+            // 競馬場別成績（ダート）
+            fields.Add(CreatePerformanceRepeatField(801, "sapporo_dirt_results", "札幌ダ・着回数: 札幌・ダートでの1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(825, "hakodate_dirt_results", "函館ダ・着回数: 函館・ダートでの1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(849, "fukushima_dirt_results", "福島ダ・着回数: 福島・ダートでの1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(873, "niigata_dirt_results", "新潟ダ・着回数: 新潟・ダートでの1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(897, "tokyo_dirt_results", "東京ダ・着回数: 東京・ダートでの1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(921, "nakayama_dirt_results", "中山ダ・着回数: 中山・ダートでの1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(945, "chukyo_dirt_results", "中京ダ・着回数: 中京・ダートでの1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(969, "kyoto_dirt_results", "京都ダ・着回数: 京都・ダートでの1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(993, "hanshin_dirt_results", "阪神ダ・着回数: 阪神・ダートでの1着～5着及び着外(6着以下)の回数", 6, 4));
+            fields.Add(CreatePerformanceRepeatField(1017, "kokura_dirt_results", "小倉ダ・着回数: 小倉・ダートでの1着～5着及び着外(6着以下)の回数", 6, 4));
+
+            // 競馬場別成績（障害）
+            fields.Add(CreatePerformanceRepeatField(1041, "sapporo_obstacle_results", "札幌障・着回数: 札幌・障害での1着～5着及び着外(6着以下)の回数", 6, 3));
+            fields.Add(CreatePerformanceRepeatField(1059, "hakodate_obstacle_results", "函館障・着回数: 函館・障害での1着～5着及び着外(6着以下)の回数", 6, 3));
+            fields.Add(CreatePerformanceRepeatField(1077, "fukushima_obstacle_results", "福島障・着回数: 福島・障害での1着～5着及び着外(6着以下)の回数", 6, 3));
+            fields.Add(CreatePerformanceRepeatField(1095, "niigata_obstacle_results", "新潟障・着回数: 新潟・障害での1着～5着及び着外(6着以下)の回数", 6, 3));
+            fields.Add(CreatePerformanceRepeatField(1113, "tokyo_obstacle_results", "東京障・着回数: 東京・障害での1着～5着及び着外(6着以下)の回数", 6, 3));
+            fields.Add(CreatePerformanceRepeatField(1131, "nakayama_obstacle_results", "中山障・着回数: 中山・障害での1着～5着及び着外(6着以下)の回数", 6, 3));
+            fields.Add(CreatePerformanceRepeatField(1149, "chukyo_obstacle_results", "中京障・着回数: 中京・障害での1着～5着及び着外(6着以下)の回数", 6, 3));
+            fields.Add(CreatePerformanceRepeatField(1167, "kyoto_obstacle_results", "京都障・着回数: 京都・障害での1着～5着及び着外(6着以下)の回数", 6, 3));
+            fields.Add(CreatePerformanceRepeatField(1185, "hanshin_obstacle_results", "阪神障・着回数: 阪神・障害での1着～5着及び着外(6着以下)の回数", 6, 3));
+            fields.Add(CreatePerformanceRepeatField(1203, "kokura_obstacle_results", "小倉障・着回数: 小倉・障害での1着～5着及び着外(6着以下)の回数", 6, 3));
+
+            return fields;
+        }
+
+        // 成績繰り返しフィールド作成ヘルパーメソッド
+        private RepeatFieldDefinition CreatePerformanceRepeatField(int position, string tableName, string comment, int repeatCount, int length)
+        {
+            return new RepeatFieldDefinition
+            {
+                Position = position,
+                RepeatCount = repeatCount,
+                Length = length,
+                Table = new TableDefinition
+                {
+                    Name = tableName,
+                    Comment = comment,
+                    Fields = new List<FieldDefinition>
+            {
+                new NormalFieldDefinition { Position = 1, Name = "result_count", Length = length, IsPrimaryKey = false, Comment = "着回数: 1着、2着、3着、4着、5着、着外の順" }
+            }
+                }
+            };
         }
     }
 }

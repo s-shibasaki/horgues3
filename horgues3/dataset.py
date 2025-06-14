@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class HorguesDataset(Dataset):
 
-    def __init__(self, start_ymd: str, end_ymd: str, max_horses: int = 18, max_hist_len: int = 18, max_prev_days: int = 365, hours_before_race: int = 2):
+    def __init__(self, start_ymd: str, end_ymd: str, max_horses: int = 18, max_hist_len: int = 10, max_prev_days: int = 365, hours_before_race: int = 2):
         """
         Args:
             start_ymd (str): 開始日 (YYYYMMDD形式)
