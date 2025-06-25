@@ -984,7 +984,7 @@ namespace JVDataCollector
             //       欧字->eng, 略称->short, 変更前->prev, 賞金->shokin, 前->mae, 後->ushiro, ハロン->furlong(s),
             //       数->su, 順位->juni, 馬番->umaban, 枠番->wakuban, 人気順->ninkijun, 組番->kumiban,
             //       馬齢->barei, 馬体重->bataiju, 時分->hourmin, 最低->min, 最高->max, 競走馬->kyosoba,
-            //       生年月日->birth_date, 年月日場回日R->race_id, 新潟->nigata, 回数->kaisu, 時刻->time
+            //       生年月日->birth_date, 年月日場回日R->race_id, 新潟->nigata, 回数->kaisu, 時刻->jikoku
             //       重勝式->win5
 
             Console.WriteLine("Creating record definitions based on JV-Data specification...");
@@ -4458,7 +4458,7 @@ namespace JVDataCollector
                         new NormalFieldDefinition { Position = 3, Length = 1, Name = "data_kubun", IsPrimaryKey = false, Comment = "データ区分", DataType = "CHAR" },
                         new NormalFieldDefinition { Position = 12, Length = 1, Name = "training_center_kubun", IsPrimaryKey = true, Comment = "トレセン区分", DataType = "CHAR" },
                         new NormalFieldDefinition { Position = 13, Length = 8, Name = "chokyo_date", IsPrimaryKey = true, Comment = "調教年月日", DataType = "CHAR" },
-                        new NormalFieldDefinition { Position = 21, Length = 4, Name = "chokyo_time", IsPrimaryKey = true, Comment = "調教時刻", DataType = "CHAR" },
+                        new NormalFieldDefinition { Position = 21, Length = 4, Name = "chokyo_jikoku", IsPrimaryKey = true, Comment = "調教時刻", DataType = "CHAR" },
                         new NormalFieldDefinition { Position = 25, Length = 10, Name = "ketto_toroku_number", IsPrimaryKey = true, Comment = "血統登録番号", DataType = "CHAR" },
                         new NormalFieldDefinition { Position = 35, Length = 4, Name = "time_gokei_4_furlongs", IsPrimaryKey = false, Comment = "4ハロンタイム合計(800M～0M)", DataType = "CHAR" },
                         new NormalFieldDefinition { Position = 39, Length = 3, Name = "lap_time_800_600", IsPrimaryKey = false, Comment = "ラップタイム(800M～600M)", DataType = "CHAR" },
@@ -4824,7 +4824,7 @@ namespace JVDataCollector
                         new NormalFieldDefinition { Position = 3, Length = 1, Name = "data_kubun", IsPrimaryKey = false, Comment = "データ区分", DataType = "CHAR" },
                         new NormalFieldDefinition { Position = 12, Length = 1, Name = "training_center_kubun", IsPrimaryKey = true, Comment = "トレセン区分", DataType = "CHAR" },
                         new NormalFieldDefinition { Position = 13, Length = 8, Name = "chokyo_date", IsPrimaryKey = true, Comment = "調教年月日", DataType = "CHAR" },
-                        new NormalFieldDefinition { Position = 21, Length = 4, Name = "chokyo_time", IsPrimaryKey = true, Comment = "調教時刻", DataType = "CHAR" },
+                        new NormalFieldDefinition { Position = 21, Length = 4, Name = "chokyo_jikoku", IsPrimaryKey = true, Comment = "調教時刻", DataType = "CHAR" },
                         new NormalFieldDefinition { Position = 25, Length = 10, Name = "ketto_toroku_number", IsPrimaryKey = true, Comment = "血統登録番号", DataType = "CHAR" },
                         new NormalFieldDefinition { Position = 35, Length = 1, Name = "course", IsPrimaryKey = false, Comment = "コース", DataType = "CHAR" },
                         new NormalFieldDefinition { Position = 36, Length = 1, Name = "baba_mawari", IsPrimaryKey = false, Comment = "馬場周り", DataType = "CHAR" },
