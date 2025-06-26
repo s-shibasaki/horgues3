@@ -114,6 +114,9 @@ logs/
 tensorboard/
 wandb/
 
+# Cache directory
+cache/
+
 # Data files
 *.csv
 *.parquet

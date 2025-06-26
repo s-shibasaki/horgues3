@@ -2,8 +2,11 @@ import numpy as np
 from torch.utils.data import Dataset
 from sqlalchemy import create_engine
 import pandas as pd
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
+from pathlib import Path
+import hashlib
+import pickle
 
 
 class HorguesDataset(Dataset):
@@ -14,8 +17,9 @@ class HorguesDataset(Dataset):
         horse_history_length: int = 18,
         history_days: int = 365,
         exclude_hours_before_race: int = 2,
-        scaler_params: Optional[Dict[str, Dict[str, float]]] = None,
-        encoder_params: Optional[Dict[str, Dict[Any, int]]] = None,
+        preprocessing_params: Optional[Dict[str, Dict]] = None,
+        cache_dir: Optional[str] = 'cache',
+        use_cache: bool = True,
     ):
         self._start_date = start_date
         self._end_date = end_date
@@ -23,6 +27,15 @@ class HorguesDataset(Dataset):
         self._horse_history_length = horse_history_length
         self._history_days = history_days
         self._exclude_hours_before_race = exclude_hours_before_race
+        self._cache_dir = Path(cache_dir)
+        self._use_cache = use_cache
+
+        self._feature_aliases = {
+            # Numerical features
+
+            # Categorical features
+
+        }
 
         self._data = self._get_data()
         self._target_race_ids = self._get_target_race_ids()
@@ -30,20 +43,34 @@ class HorguesDataset(Dataset):
         self._categorical_data = self._process_categorical_data()
         self._meta_data = self._process_meta_data()
 
-        if scaler_params is not None:
-            self._scaler_params = scaler_params
+        if preprocessing_params is not None:
+            self._scaler_params = preprocessing_params.get('scaler', {})
+            self._encoder_params = preprocessing_params.get('encoder', {})
         else:
             self._scaler_params = self._fit_scaler()
-        
-        self._scaled_numerical_data = self._scale_numerical_features()
-
-        if encoder_params is not None:
-            self._encoder_params = encoder_params
-        else:
             self._encoder_params = self._fit_encoder()
-        
+
+        self._scaled_numerical_data = self._scale_numerical_features()
         self._encoded_categorical_data = self._encode_categorical_features()
+
         self._precompute_history_groups()
+
+        if self._use_cache:
+            self._cache_dir.mkdir(exist_ok=True)
+            self._cache_key = hashlib.md5(f"{self._start_date}_{self._end_date}_{self._num_horses}_{self._horse_history_length}_{self._history_days}_{self._exclude_hours_before_race}".encode()).hexdigest()
+
+
+    def get_preprocessing_params(self) -> Dict[str, Dict]:
+        return {
+            'scaler': self._scaler_params,
+            'encoder': self._encoder_params
+        }
+    
+    def get_target_race_ids(self) -> pd.Index:
+        return self._target_race_ids
+    
+    def get_feature_aliases(self) -> Dict[str, str]:
+        return self._feature_aliases
 
     def _get_data(self) -> None:
         start_dt = datetime.strptime(self._start_date, '%Y%m%d')
@@ -81,7 +108,7 @@ class HorguesDataset(Dataset):
         
         result = result.set_index(['race_id', 'umaban'], drop=False).sort_index()
         return result
-    
+
     def _get_target_race_ids(self) -> pd.Index:
         target_data = self._data[
             (self._data['data_kubun'].isin(['2', '7'])) &
@@ -148,44 +175,77 @@ class HorguesDataset(Dataset):
     
     def _fit_scaler(self) -> Dict[str, Dict[str, float]]:
         scaler_params = {}
-
+        
+        # エイリアスごとに特徴量をグループ化
+        alias_to_features = {}
         for column in self._numerical_data.columns:
-            values = self._numerical_data[column].dropna().values
-            if len(values) > 0:
-                mean_val = float(values.mean())
-                std_val = float(values.std())
+            alias = self._feature_aliases.get(column, column)
+            if alias not in alias_to_features:
+                alias_to_features[alias] = []
+            alias_to_features[alias].append(column)
+        
+        # エイリアスごとにスケーラーをフィット
+        for alias, features in alias_to_features.items():
+            # 同じエイリアスを持つ全ての特徴量の値を結合
+            all_values = []
+            for feature in features:
+                values = self._numerical_data[feature].dropna().values
+                all_values.extend(values)
+            
+            if len(all_values) > 0:
+                all_values = np.array(all_values)
+                mean_val = float(all_values.mean())
+                std_val = float(all_values.std())
                 if std_val == 0:
                     std_val = 1.0
-                scaler_params[column] = {'mean': mean_val, 'std': std_val}
+                scaler_params[alias] = {'mean': mean_val, 'std': std_val}
             else:
-                scaler_params[column] = {'mean': 0.0, 'std': 1.0}
+                scaler_params[alias] = {'mean': 0.0, 'std': 1.0}
 
         return scaler_params
 
     def _fit_encoder(self) -> Dict[str, Dict[Any, int]]:
         encoder_params = {}
-
+        
+        # エイリアスごとに特徴量をグループ化
+        alias_to_features = {}
         for column in self._categorical_data.columns:
-            values = self._categorical_data[column].dropna().unique()
-            if len(values) > 0:
-                encoder_params[column] = {value: idx + 1 for idx, value in enumerate(values)}
+            alias = self._feature_aliases.get(column, column)
+            if alias not in alias_to_features:
+                alias_to_features[alias] = []
+            alias_to_features[alias].append(column)
+        
+        # エイリアスごとにエンコーダーをフィット
+        for alias, features in alias_to_features.items():
+            # 同じエイリアスを持つ全ての特徴量の一意な値を結合
+            all_values = set()
+            for feature in features:
+                values = self._categorical_data[feature].dropna().unique()
+                all_values.update(values)
+            
+            if len(all_values) > 0:
+                # ソートして一貫性を保つ
+                sorted_values = sorted(all_values)
+                encoder_params[alias] = {value: idx + 1 for idx, value in enumerate(sorted_values)}
             else:
-                encoder_params[column] = {}
+                encoder_params[alias] = {}
 
         return encoder_params
     
     def _scale_numerical_features(self):
         scaled_data = pd.DataFrame(index=self._data.index)
         for column in self._numerical_data.columns:
-            mean = self._scaler_params[column]['mean']
-            std = self._scaler_params[column]['std']
+            alias = self._feature_aliases.get(column, column)
+            mean = self._scaler_params[alias]['mean']
+            std = self._scaler_params[alias]['std']
             scaled_data[column] = (self._numerical_data[column] - mean) / std
         return scaled_data
 
     def _encode_categorical_features(self):
         encoded_data = pd.DataFrame(index=self._data.index)
         for column in self._categorical_data.columns:
-            mapping = self._encoder_params[column]
+            alias = self._feature_aliases.get(column, column)
+            mapping = self._encoder_params[alias]
             encoded_data[column] = self._categorical_data[column].map(mapping).fillna(0).astype(np.int64)
         return encoded_data
     
@@ -198,10 +258,7 @@ class HorguesDataset(Dataset):
 
         self._history_groups = history_groups
 
-    def __len__(self) -> int:
-        return len(self._target_race_ids)
-    
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
+    def _compute_item(self, idx: int) -> Dict[str, Any]:
         race_id = self._target_race_ids[idx]
 
         data = {
@@ -277,4 +334,27 @@ class HorguesDataset(Dataset):
             # ランキングの設定
             data['rankings'][horse_idx] = horse_meta_data['kakutei_chakujun']
 
+        return data
+
+    def __len__(self) -> int:
+        return len(self._target_race_ids)
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        if self._use_cache:
+            cache_path = self._cache_dir / f"{self._cache_key}_{idx}.pkl"
+            try:
+                with open(cache_path, 'rb') as f:
+                    return pickle.load(f)
+            except:
+                pass
+                
+        data = self._compute_item(idx)
+
+        if self._use_cache:
+            try:
+                with open(cache_path, 'wb') as f:
+                    pickle.dump(data, f)
+            except:
+                pass
+        
         return data

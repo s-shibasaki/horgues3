@@ -133,7 +133,7 @@ class FeatureTokenizer(nn.Module):
         for feature, vocab_size in categorical_features.items():
             tokenizer_name = self.feature_aliases.get(feature, feature)
             if tokenizer_name not in self.categorical_tokenizers:
-                self.categorical_tokenizers[tokenizer_name] = nn.Embedding(vocab_size, d_token, padding_idx=0) 
+                self.categorical_tokenizers[tokenizer_name] = nn.Embedding(vocab_size + 1, d_token, padding_idx=0) 
 
         self.norm = nn.LayerNorm(d_token)
         self.dropout = nn.Dropout(dropout)
@@ -479,7 +479,8 @@ class HorguesModel(nn.Module):
     def __init__(self,
                  sequence_names: List[str],
                  feature_aliases: Dict[str, str],
-                 dataset_params: Dict[str, Any],
+                 numerical_features: List[str],
+                 categorical_features: Dict[str, int],
 
                  # 次元数
                  d_token: int = 768,  # 競馬の複雑な特徴量関係を捉えるための十分な次元数
@@ -512,8 +513,8 @@ class HorguesModel(nn.Module):
         self.d_token = d_token
 
         # dataset_params から必要な情報を抽出
-        self.numerical_features = list(dataset_params['numerical'].keys())
-        self.categorical_features = {name: config['num_classes'] for name, config in dataset_params['categorical'].items()}
+        self.numerical_features = numerical_features
+        self.categorical_features = categorical_features
 
         # 共通のFeatureTokenizer（SoftBinning対応）
         self.tokenizer = FeatureTokenizer(
