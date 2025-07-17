@@ -97,7 +97,7 @@ class PluckettLuceKeibaBetting(nn.Module):
     def forward(self, scores: torch.Tensor, num_horses_running: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Args:
-            scores: (batch_size, num_horses) - 各馬の強さスコア
+            scores: (batch_size, num_horses, 3) - 各馬の1着/2着/3着スコア
             num_horses_running: (batch_size,) - 各レースの出走頭数
         
         Returns:
@@ -152,9 +152,20 @@ class PluckettLuceKeibaBetting(nn.Module):
     def _calculate_permutation_probabilities(self, scores: torch.Tensor) -> torch.Tensor:
         """1～3着の全順列の確率を計算"""
 
+        # scores: (batch_size, num_horses, 3) - [1着スコア, 2着スコア, 3着スコア]
+        first_scores = scores[:, :, 0]   # (batch_size, num_horses) - 1着スコア
+        second_scores = scores[:, :, 1]  # (batch_size, num_horses) - 2着スコア
+        third_scores = scores[:, :, 2]   # (batch_size, num_horses) - 3着スコア
+
         # 数値安定性のためのクリッピング 
-        scores = torch.clamp(scores, min=-10, max=10)
-        exp_scores = scores.exp()
+        first_scores = torch.clamp(first_scores, min=-10, max=10)
+        second_scores = torch.clamp(second_scores, min=-10, max=10)
+        third_scores = torch.clamp(third_scores, min=-10, max=10)
+        
+        # 指数を取る
+        exp_first_scores = first_scores.exp()
+        exp_second_scores = second_scores.exp()
+        exp_third_scores = third_scores.exp()
 
         # 各順列の1着、2着、3着のインデックス
         first_indices = self.perm_indices[:, 0]   # (num_permutations,)
@@ -162,21 +173,22 @@ class PluckettLuceKeibaBetting(nn.Module):
         third_indices = self.perm_indices[:, 2]   # (num_permutations,)
         
         # 1着の確率を計算
-        first_scores = exp_scores[:, first_indices]  # (batch_size, num_permutations)
-        first_denominator = exp_scores.sum(dim=1, keepdim=True)
-        first_probs = first_scores / first_denominator
+        perm_first_scores = exp_first_scores[:, first_indices]  # (batch_size, num_permutations)
+        first_denominator = exp_first_scores.sum(dim=1, keepdim=True)
+        first_probs = perm_first_scores / first_denominator
 
         # 2着の確率を計算（1着馬を除外）
-        second_scores = exp_scores[:, second_indices]
-        first_horse_scores = exp_scores[:, first_indices]
-        second_denominator = first_denominator - first_horse_scores
-        second_probs = second_scores / second_denominator
+        perm_second_scores = exp_second_scores[:, second_indices]
+        first_horse_scores = exp_second_scores[:, first_indices]
+        second_denominator = exp_second_scores.sum(dim=1, keepdim=True) - first_horse_scores
+        second_probs = perm_second_scores / second_denominator
 
         # 3着の確率を計算（1着、2着馬を除外）
-        third_scores = exp_scores[:, third_indices]
-        second_horse_scores = exp_scores[:, second_indices]
-        third_denominator = second_denominator - second_horse_scores
-        third_probs = third_scores / third_denominator
+        perm_third_scores = exp_third_scores[:, third_indices]
+        first_horse_scores = exp_third_scores[:, first_indices]
+        second_horse_scores = exp_third_scores[:, second_indices]
+        third_denominator = exp_third_scores.sum(dim=1, keepdim=True) - first_horse_scores - second_horse_scores
+        third_probs = perm_third_scores / third_denominator
 
         # 全体の順列確率（1着 × 2着 × 3着）: (batch_size, num_permutations)
         perm_probs = first_probs * second_probs * third_probs
@@ -190,7 +202,7 @@ if __name__ == "__main__":
     
     # サンプル入力
     batch_size = 2
-    scores = torch.randn(batch_size, 18)  # ランダムなスコア
+    scores = torch.randn(batch_size, 18, 3)  # 3つのスコア
     num_horses_running = torch.tensor([7, 12], dtype=torch.long)  # 7頭と12頭のレース
     
     # 確率計算

@@ -426,8 +426,8 @@ class RaceTransformer(nn.Module):
         self.norm = nn.LayerNorm(d_token)
         self.dropout = nn.Dropout(dropout)
 
-        # スコア計算ヘッド
-        self.score_head = nn.Linear(d_token, 1)
+        # 3つのスコア計算ヘッド（1着、2着、3着確率用）
+        self.score_head = nn.Linear(d_token, 3)
 
         self._init_weights()
 
@@ -449,7 +449,7 @@ class RaceTransformer(nn.Module):
             mask: (batch_size, num_horses) - 有効な馬のマスク (1=有効, 0=無効/パディング)
 
         Returns:
-            scores: (batch_size, num_horses) - 相互作用を考慮した馬の強さスコア
+            scores: (batch_size, num_horses, 3) - 相互作用を考慮した馬の3つのスコア
         """
         # NaNをゼロで置換（マスクされた馬の特徴量）
         horse_vectors = torch.where(torch.isnan(horse_vectors), torch.zeros_like(horse_vectors), horse_vectors)
@@ -463,12 +463,13 @@ class RaceTransformer(nn.Module):
         x = self.norm(x)
         x = self.dropout(x)
         
-        # 各馬の強さスコアを計算
-        scores = self.score_head(x).squeeze(-1)  # (batch_size, num_horses)
+        # 各馬の3つのスコアを計算
+        scores = self.score_head(x)  # (batch_size, num_horses, 3)
 
-        # マスクされた馬のスコアを-1e-9に設定 (softmax時に0になる)
+        # マスクされた馬のスコアを-1e9に設定 (softmax時に0になる)
         if mask is not None:
-            scores = scores.masked_fill(~mask.bool(), -1e9)
+            mask_expanded = mask.unsqueeze(-1).expand(-1, -1, 3)  # (batch_size, num_horses, 3)
+            scores = scores.masked_fill(~mask_expanded.bool(), -1e9)
 
         return scores
 
@@ -595,7 +596,7 @@ class HorguesModel(nn.Module):
                 }
             mask: (batch_size, num_horses) - 有効な馬のマスク
         Returns:
-            scores: (batch_size, num_horses) - 各馬の強さスコア
+            scores: (batch_size, num_horses, 3) - 各馬の強さスコア
         """
         batch_size, num_horses = mask.shape if mask is not None else (list(x_num.values())[0].shape[:2] if x_num else list(x_cat.values())[0].shape[:2])
         
@@ -673,7 +674,7 @@ class HorguesModel(nn.Module):
         horse_vectors = torch.stack(horse_features, dim=1)  # (batch_size, num_horses, d_token)
         
         # RaceTransformerで相互作用を考慮した強さスコアを計算
-        scores = self.race_transformer(horse_vectors, mask)  # (batch_size, num_horses)
+        scores = self.race_transformer(horse_vectors, mask)  # (batch_size, num_horses, 3)
 
         return scores
 
