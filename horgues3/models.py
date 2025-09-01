@@ -135,6 +135,10 @@ class FeatureTokenizer(nn.Module):
             if tokenizer_name not in self.categorical_tokenizers:
                 self.categorical_tokenizers[tokenizer_name] = nn.Embedding(vocab_size + 1, d_token, padding_idx=0) 
 
+        # トークン統合用のMLPレイヤー
+        n_tokens = len(numerical_features) + len(categorical_features)
+        self.gelu = nn.GELU()
+        self.linear = nn.Linear(n_tokens * d_token, d_token)
         self.norm = nn.LayerNorm(d_token)
         self.dropout = nn.Dropout(dropout)
 
@@ -149,6 +153,11 @@ class FeatureTokenizer(nn.Module):
             if embedding.padding_idx is not None:
                 nn.init.constant_(embedding.weight[embedding.padding_idx], 0)
         
+        # 統合用線形層の初期化
+        nn.init.xavier_uniform_(self.linear.weight)
+        if self.linear.bias is not None:
+            nn.init.constant_(self.linear.bias, 0)
+        
         # LayerNormの初期化（通常はデフォルトで適切）
         nn.init.constant_(self.norm.weight, 1.0)
         nn.init.constant_(self.norm.bias, 0.0)
@@ -160,15 +169,17 @@ class FeatureTokenizer(nn.Module):
             x_num: 数値特徴量 - 各値は任意の形状のテンソル
             x_cat: カテゴリ特徴量 - 各値は任意の形状のテンソル
         Returns:
-            tokens: (..., num_tokens, d_token) - トークン化された特徴量
+            output: (..., d_token) - 統合された特徴量
         """
         tokens = []
 
-        # 数値特徴量のトークン化
-        if x_num is not None:
-            for name, feature_values in x_num.items():
-                tokenizer_name = self.feature_aliases.get(name, name)
-                tokenizer = self.numerical_tokenizers[tokenizer_name]
+        # 数値特徴量のトークン化（定義された順序でループ）
+        for name in self.numerical_features:
+            tokenizer_name = self.feature_aliases.get(name, name)
+            tokenizer = self.numerical_tokenizers[tokenizer_name]
+            
+            if x_num is not None and name in x_num:
+                feature_values = x_num[name]
                 
                 # NaN処理
                 nan_mask = torch.isnan(feature_values)
@@ -180,24 +191,59 @@ class FeatureTokenizer(nn.Module):
                 # NaN位置のトークンをゼロにする
                 nan_mask = nan_mask.unsqueeze(-1)  # (..., 1)
                 token = torch.where(nan_mask, torch.zeros_like(token), token)
-                tokens.append(token)
+            else:
+                # 特徴量が存在しない場合はゼロトークンを作成
+                # 他の特徴量から形状を推定
+                if x_num and len(x_num) > 0:
+                    sample_tensor = next(iter(x_num.values()))
+                elif x_cat and len(x_cat) > 0:
+                    sample_tensor = next(iter(x_cat.values()))
+                else:
+                    # 何も特徴量がない場合は1次元のゼロテンソル
+                    sample_tensor = torch.zeros(1, device=next(self.parameters()).device)
+                
+                # サンプルテンソルの形状でゼロトークンを作成
+                token_shape = sample_tensor.shape + (self.d_token,)
+                token = torch.zeros(token_shape, device=sample_tensor.device, dtype=torch.float32)
+            
+            tokens.append(token)
 
-        # カテゴリ特徴量のトークン化
-        if x_cat is not None:
-            for name, feature_values in x_cat.items():
-                tokenizer_name = self.feature_aliases.get(name, name)
-                tokenizer = self.categorical_tokenizers[tokenizer_name]
+        # カテゴリ特徴量のトークン化（定義された順序でループ）
+        for name in self.categorical_features.keys():
+            tokenizer_name = self.feature_aliases.get(name, name)
+            tokenizer = self.categorical_tokenizers[tokenizer_name]
+            
+            if x_cat is not None and name in x_cat:
+                feature_values = x_cat[name]
                 token = tokenizer(feature_values)  # (..., d_token)
-                tokens.append(token)
+            else:
+                # 特徴量が存在しない場合はパディングIDでトークンを作成
+                # 他の特徴量から形状を推定
+                if x_cat and len(x_cat) > 0:
+                    sample_tensor = next(iter(x_cat.values()))
+                elif x_num and len(x_num) > 0:
+                    sample_tensor = next(iter(x_num.values()))
+                else:
+                    # 何も特徴量がない場合は1次元のゼロテンソル
+                    sample_tensor = torch.zeros(1, device=next(self.parameters()).device, dtype=torch.long)
+                
+                # サンプルテンソルの形状でパディングIDのテンソルを作成
+                padding_shape = sample_tensor.shape
+                padding_tensor = torch.zeros(padding_shape, device=sample_tensor.device, dtype=torch.long)
+                token = tokenizer(padding_tensor)  # (..., d_token)
+            
+            tokens.append(token)
 
-        # トークンを結合
-        result = torch.stack(tokens, dim=-2)  # (..., num_tokens, d_token)
+        # トークンをconcatenate
+        concatenated = torch.cat(tokens, dim=-1)  # (..., n_tokens * d_token)
 
-        # 正規化とドロップアウト
-        result = self.norm(result)
-        result = self.dropout(result)
+        # GELU -> Linear -> Norm -> Dropout
+        output = self.gelu(concatenated)
+        output = self.linear(output)  # (..., d_token)
+        output = self.norm(output)
+        output = self.dropout(output)
         
-        return result
+        return output
     
 
 class AttentionHead(nn.Module):
@@ -424,6 +470,8 @@ class RaceTransformer(nn.Module):
         ])
 
         self.norm = nn.LayerNorm(d_token)
+        self.linear = nn.Linear(d_token, d_token)
+        self.gelu = nn.GELU()
         self.dropout = nn.Dropout(dropout)
 
         # スコア計算ヘッド
@@ -436,6 +484,11 @@ class RaceTransformer(nn.Module):
         # LayerNormの初期化
         nn.init.constant_(self.norm.weight, 1.0)
         nn.init.constant_(self.norm.bias, 0.0)
+        
+        # Linearレイヤーの初期化
+        nn.init.xavier_uniform_(self.linear.weight)
+        if self.linear.bias is not None:
+            nn.init.constant_(self.linear.bias, 0)
         
         # スコアヘッドの初期化（出力の分散を小さくする）
         nn.init.xavier_uniform_(self.score_head.weight)
@@ -459,8 +512,12 @@ class RaceTransformer(nn.Module):
         for block in self.transformer_blocks:
             x = block(x, mask)
 
-        # 正規化とドロップアウト
+        # 正規化
         x = self.norm(x)
+        
+        # linear -> gelu -> dropout -> score_head の順序で処理
+        x = self.linear(x)
+        x = self.gelu(x)
         x = self.dropout(x)
         
         # 各馬の強さスコアを計算
@@ -480,7 +537,7 @@ class HorguesModel(nn.Module):
             categorical_features: Dict[str, int],
 
             # 次元数 - 標準的な値に変更
-            d_token: int = 256,  # 中程度の表現力を持つ標準的な次元数
+            d_token: int = 512,  # 中程度の表現力を持つ標準的な次元数
 
             # SoftBinning 設定 - 標準的な値
             num_bins: int = 10,  # より一般的なビン数
@@ -488,14 +545,14 @@ class HorguesModel(nn.Module):
             binning_init_range: float = 3.0,  # 標準的な初期化範囲
 
             # 時系列統合Transformer - 標準的な設定
-            seq_n_layers: int = 3,
+            seq_n_layers: int = 4,
             seq_n_heads: int = 8,
-            seq_d_ffn: int = 1024,  # d_token * 4 の標準的な比率
+            seq_d_ffn: int = 2048,  # d_token * 4 の標準的な比率
 
             # レース内相互作用Transformer - 標準的な設定
-            race_n_layers: int = 3,  # より軽量に
+            race_n_layers: int = 4,  # より軽量に
             race_n_heads: int = 8,
-            race_d_ffn: int = 1024,  # d_token * 4 の標準的な比率
+            race_d_ffn: int = 2048,  # d_token * 4 の標準的な比率
 
             # 過学習防止 - 標準的なドロップアウト率
             dropout: float = 0.1
@@ -521,16 +578,14 @@ class HorguesModel(nn.Module):
             dropout=dropout
         )
 
-        # 時系列用のSequenceTransformer (時系列処理用)
-        self.sequence_transformers = nn.ModuleDict()
-        for seq_name in self.sequence_names:
-            self.sequence_transformers[seq_name] = SequenceTransformer(
-                d_token=d_token,
-                n_layers=seq_n_layers,
-                n_heads=seq_n_heads,
-                d_ffn=seq_d_ffn,
-                dropout=dropout
-            )
+        # 時系列用のSequenceTransformer (単一のTransformer)
+        self.sequence_transformer = SequenceTransformer(
+            d_token=d_token,
+            n_layers=seq_n_layers,
+            n_heads=seq_n_heads,
+            d_ffn=seq_d_ffn,
+            dropout=dropout
+        )
 
         # Race Transformer (レース内相互作用用)
         self.race_transformer = RaceTransformer(
@@ -568,42 +623,11 @@ class HorguesModel(nn.Module):
         horse_features = []
 
         for horse_idx in range(num_horses):
-            # 全ての特徴量を格納するリスト（時系列・一般特徴量を同じように扱う）
-            all_features = []
+            # 全てのシーケンスを結合するためのリスト
+            all_sequence_tokens = []
+            all_sequence_masks = []
             
-            # 1. 時系列データの処理
-            for seq_name, seq_data in (sequence_data or {}).items():
-                # 時系列データから該当馬のデータを抽出
-                seq_x_num = {}
-                seq_x_cat = {}
-                seq_mask = None
-                
-                if 'x_num' in seq_data:
-                    for key, val in seq_data['x_num'].items():
-                        seq_x_num[key] = val[:, horse_idx]  # (batch_size, seq_len)
-                
-                if 'x_cat' in seq_data:
-                    for key, val in seq_data['x_cat'].items():
-                        seq_x_cat[key] = val[:, horse_idx]  # (batch_size, seq_len)
-                
-                if 'mask' in seq_data:
-                    seq_mask = seq_data['mask'][:, horse_idx]  # (batch_size, seq_len)
-
-                # FeatureTokenizer -> SequenceTransformer
-                seq_tokens = self.tokenizer(seq_x_num or None, seq_x_cat or None)  # (batch_size, seq_len, num_features, d_token)
-                
-                # 各時系列ステップの特徴量を統合（加算）
-                if seq_tokens.size(-2) > 0:  # 特徴量が存在する場合
-                    batch_size_seq, seq_len, num_features, d_token = seq_tokens.shape
-                    
-                    # 特徴量を加算で統合
-                    step_features = seq_tokens.sum(dim=-2)  # (batch_size, seq_len, d_token)
-                    
-                    # SequenceTransformerで時系列を処理
-                    seq_feature = self.sequence_transformers[seq_name](step_features, seq_mask)  # (batch_size, d_token)
-                    all_features.append(seq_feature)
-
-            # 2. 一般データの処理（時系列と同じように扱う）
+            # 1. 一般特徴量を最初に追加
             general_x_num = {}
             general_x_cat = {}
             
@@ -613,19 +637,62 @@ class HorguesModel(nn.Module):
             for key, val in (x_cat or {}).items():
                 general_x_cat[key] = val[:, horse_idx]  # (batch_size,)
 
-            # 一般データをトークン化
-            general_tokens = self.tokenizer(general_x_num or None, general_x_cat or None)  # (batch_size, num_features, d_token)
+            # 一般データをトークン化してunsqueezeで時系列次元を追加
+            general_tokens = self.tokenizer(general_x_num or None, general_x_cat or None)  # (batch_size, d_token)
+            general_tokens = general_tokens.unsqueeze(1)  # (batch_size, 1, d_token)
+            all_sequence_tokens.append(general_tokens)
             
-            # 一般データの各特徴量を個別に追加
-            if general_tokens.size(-2) > 0:  # 特徴量が存在する場合
-                for feature_idx in range(general_tokens.size(-2)):
-                    feature_token = general_tokens[:, feature_idx, :]  # (batch_size, d_token)
-                    all_features.append(feature_token)
+            # 一般特徴量のマスク（常に有効）
+            general_mask = torch.ones(batch_size, 1, device=general_tokens.device)
+            all_sequence_masks.append(general_mask)
+            
+            # 2. 時系列データを順次追加
+            for seq_name in self.sequence_names:
+                if sequence_data and seq_name in sequence_data:
+                    seq_data = sequence_data[seq_name]
+                    
+                    # 時系列データから該当馬のデータを抽出
+                    seq_x_num = {}
+                    seq_x_cat = {}
+                    seq_mask = None
+                    
+                    if 'x_num' in seq_data:
+                        for key, val in seq_data['x_num'].items():
+                            seq_x_num[key] = val[:, horse_idx]  # (batch_size, seq_len)
+                    
+                    if 'x_cat' in seq_data:
+                        for key, val in seq_data['x_cat'].items():
+                            seq_x_cat[key] = val[:, horse_idx]  # (batch_size, seq_len)
+                    
+                    if 'mask' in seq_data:
+                        seq_mask = seq_data['mask'][:, horse_idx]  # (batch_size, seq_len)
 
-            # 3. 最終統合（1段階で全特徴量を加算）
-            if all_features:
-                # 全ての特徴量を加算で統合
-                horse_feature = torch.stack(all_features, dim=0).sum(dim=0)  # (batch_size, d_token)
+                    # FeatureTokenizerでトークン化
+                    seq_tokens = self.tokenizer(seq_x_num or None, seq_x_cat or None)  # (batch_size, seq_len, d_token) または (batch_size, d_token)
+                    
+                    # 時系列の場合
+                    if seq_tokens.dim() == 3:  # (batch_size, seq_len, d_token)
+                        all_sequence_tokens.append(seq_tokens)
+                        if seq_mask is not None:
+                            all_sequence_masks.append(seq_mask)
+                        else:
+                            # マスクがない場合は全て有効とする
+                            seq_len = seq_tokens.shape[1]
+                            default_mask = torch.ones(batch_size, seq_len, device=seq_tokens.device)
+                            all_sequence_masks.append(default_mask)
+                    else:  # (batch_size, d_token) - 非時系列データ
+                        seq_tokens = seq_tokens.unsqueeze(1)  # (batch_size, 1, d_token)
+                        all_sequence_tokens.append(seq_tokens)
+                        default_mask = torch.ones(batch_size, 1, device=seq_tokens.device)
+                        all_sequence_masks.append(default_mask)
+
+            # 3. 全てのシーケンスを結合
+            if all_sequence_tokens:
+                combined_tokens = torch.cat(all_sequence_tokens, dim=1)  # (batch_size, total_seq_len, d_token)
+                combined_mask = torch.cat(all_sequence_masks, dim=1)  # (batch_size, total_seq_len)
+                
+                # 単一のSequenceTransformerで処理
+                horse_feature = self.sequence_transformer(combined_tokens, combined_mask)  # (batch_size, d_token)
             else:
                 # 特徴量がない場合はゼロベクトル
                 horse_feature = torch.zeros(batch_size, self.d_token, device=next(self.parameters()).device)
