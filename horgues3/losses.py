@@ -1,83 +1,53 @@
 import torch
-from typing import Optional
-from torch import nn
+import torch.nn as nn
+import torch.nn.functional as F
 
-class WeightedPlackettLuceLoss(nn.Module):
+
+class HorguesLoss(nn.Module):
     """
-    重み付きPlackett-Luce損失 - 上位の順位により大きな重みを付ける
-    
-    Args:
-        temperature: ソフトマックスの温度パラメータ
-        top_k: 上位k位までの損失を計算
-        weight_decay: 重みの減衰率（1.0で等重み、<1.0で上位重視）
-        reduction: 'mean', 'sum', 'none'
+    scoresとlog(targets + 0.1)の二乗誤差を計算する損失関数
+    targetがnanの部分はマスクして除外する
     """
     
-    def __init__(self, temperature: float = 1.0, top_k: Optional[int] = None, 
-                 weight_decay: float = 0.8, reduction: str = 'mean'):
+    def __init__(self, reduction: str = 'mean'):
+        """
+        Args:
+            reduction: 'mean', 'sum', or 'none'
+        """
         super().__init__()
-        self.temperature = temperature
-        self.top_k = top_k
-        self.weight_decay = weight_decay
         self.reduction = reduction
-    
-    def forward(self, scores: torch.Tensor, rankings: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        batch_size, num_horses = scores.shape
-        scaled_scores = scores / self.temperature
-        masked_scores = torch.where(mask, scaled_scores, torch.full_like(scaled_scores, -1e9))
+        self.bce_loss = nn.BCEWithLogitsLoss(reduction='none')
+
+    def forward(self, scores: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            scores: (batch_size, num_horses) - 馬の強さスコア
+            targets: (batch_size, num_horses) - ターゲット値（nanを含む可能性あり）
         
-        losses = []
+        Returns:
+            loss: スカラー損失値
+        """
+        # nanでない要素のマスクを作成
+        valid_mask = ~torch.isnan(targets)
         
-        for batch_idx in range(batch_size):
-            batch_scores = masked_scores[batch_idx]
-            batch_rankings = rankings[batch_idx]
-            batch_mask = mask[batch_idx]
-            
-            valid_horses = torch.where(batch_mask)[0]
-            if len(valid_horses) == 0:
-                continue
-                
-            valid_scores = batch_scores[valid_horses]
-            valid_rankings = batch_rankings[valid_horses]
-            
-            valid_rank_mask = valid_rankings > 0
-            if not valid_rank_mask.any():
-                continue
-                
-            final_horses = valid_horses[valid_rank_mask]
-            final_scores = valid_scores[valid_rank_mask]
-            final_rankings = valid_rankings[valid_rank_mask]
-            
-            if len(final_horses) <= 1:
-                continue
-            
-            sorted_indices = torch.argsort(final_rankings)
-            sorted_scores = final_scores[sorted_indices]
-            
-            if self.top_k is not None:
-                k = min(self.top_k, len(sorted_scores))
-                sorted_scores = sorted_scores[:k]
-            
-            # 重み付きPlackett-Luce損失を計算
-            batch_loss = 0.0
-            
-            for i in range(len(sorted_scores) - 1):
-                # i位の重み（1位が最大、下位ほど小さくなる）
-                weight = self.weight_decay ** i
-                
-                log_prob = sorted_scores[i] - torch.logsumexp(sorted_scores[i:], dim=0)
-                batch_loss -= weight * log_prob
-            
-            losses.append(batch_loss)
-        
-        if not losses:
+        # 有効な要素が存在しない場合は0を返す
+        if not valid_mask.any():
             return torch.tensor(0.0, device=scores.device, requires_grad=True)
         
-        loss_tensor = torch.stack(losses)
+        # 有効な要素のみで計算
+        valid_scores = scores[valid_mask]
+        valid_targets = targets[valid_mask]
         
+        # BCEWithLogitsLoss計算
+        losses = self.bce_loss(valid_scores, valid_targets)  # (N,)
+        
+        # reduction適用
         if self.reduction == 'mean':
-            return loss_tensor.mean()
+            return losses.mean()
         elif self.reduction == 'sum':
-            return loss_tensor.sum()
-        else:
-            return loss_tensor
+            return losses.sum()
+        else:  # 'none'
+            # 元の形状に戻すため、nanで埋めた結果を返す
+            result = torch.full_like(targets, float('nan'))
+            result[valid_mask] = losses
+            return result

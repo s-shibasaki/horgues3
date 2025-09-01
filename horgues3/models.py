@@ -427,7 +427,7 @@ class RaceTransformer(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         # スコア計算ヘッド
-        self.score_head = nn.Linear(d_token, 1)
+        self.score_head = nn.Linear(d_token, 3)
 
         self._init_weights()
 
@@ -464,11 +464,7 @@ class RaceTransformer(nn.Module):
         x = self.dropout(x)
         
         # 各馬の強さスコアを計算
-        scores = self.score_head(x).squeeze(-1)  # (batch_size, num_horses)
-
-        # マスクされた馬のスコアを-1e-9に設定 (softmax時に0になる)
-        if mask is not None:
-            scores = scores.masked_fill(~mask.bool(), -1e9)
+        scores = self.score_head(x)  # (batch_size, num_horses, 3)
 
         return scores
 
@@ -476,37 +472,34 @@ class RaceTransformer(nn.Module):
 class HorguesModel(nn.Module):
     """統合された競馬予測モデル"""
 
-    def __init__(self,
-                 sequence_names: List[str],
-                 feature_aliases: Dict[str, str],
-                 numerical_features: List[str],
-                 categorical_features: Dict[str, int],
+    def __init__(
+            self,
+            sequence_names: List[str],
+            feature_aliases: Dict[str, str],
+            numerical_features: List[str],
+            categorical_features: Dict[str, int],
 
-                 # 次元数 - 標準的な値に変更
-                 d_token: int = 256,  # 中程度の表現力を持つ標準的な次元数
+            # 次元数 - 標準的な値に変更
+            d_token: int = 256,  # 中程度の表現力を持つ標準的な次元数
 
-                 # SoftBinning 設定 - 標準的な値
-                 num_bins: int = 10,  # より一般的なビン数
-                 binning_temperature: float = 1.0,  # 標準的な温度パラメータ
-                 binning_init_range: float = 3.0,  # 標準的な初期化範囲
+            # SoftBinning 設定 - 標準的な値
+            num_bins: int = 10,  # より一般的なビン数
+            binning_temperature: float = 1.0,  # 標準的な温度パラメータ
+            binning_init_range: float = 3.0,  # 標準的な初期化範囲
 
-                 # 特徴量統合Transformer - 標準的な軽量設定
-                 ft_n_layers: int = 3,
-                 ft_n_heads: int = 8,  # 標準的なヘッド数
-                 ft_d_ffn: int = 1024,  # d_token * 4 の標準的な比率
+            # 時系列統合Transformer - 標準的な設定
+            seq_n_layers: int = 3,
+            seq_n_heads: int = 8,
+            seq_d_ffn: int = 1024,  # d_token * 4 の標準的な比率
 
-                 # 時系列統合Transformer - 標準的な設定
-                 seq_n_layers: int = 3,
-                 seq_n_heads: int = 8,
-                 seq_d_ffn: int = 1024,  # d_token * 4 の標準的な比率
+            # レース内相互作用Transformer - 標準的な設定
+            race_n_layers: int = 3,  # より軽量に
+            race_n_heads: int = 8,
+            race_d_ffn: int = 1024,  # d_token * 4 の標準的な比率
 
-                 # レース内相互作用Transformer - 標準的な設定
-                 race_n_layers: int = 3,  # より軽量に
-                 race_n_heads: int = 8,
-                 race_d_ffn: int = 1024,  # d_token * 4 の標準的な比率
-
-                 # 過学習防止 - 標準的なドロップアウト率
-                 dropout: float = 0.1):
+            # 過学習防止 - 標準的なドロップアウト率
+            dropout: float = 0.1
+    ):
         super().__init__()
         self.sequence_names = sequence_names
         self.feature_aliases = feature_aliases
@@ -528,17 +521,6 @@ class HorguesModel(nn.Module):
             dropout=dropout
         )
 
-        # 時系列用のFTTransformer (特徴量統合用)
-        self.sequence_ft_transformers = nn.ModuleDict()
-        for seq_name in self.sequence_names:
-            self.sequence_ft_transformers[seq_name] = SequenceTransformer(
-                d_token=d_token,
-                n_layers=ft_n_layers,
-                n_heads=ft_n_heads,
-                d_ffn=ft_d_ffn,
-                dropout=dropout
-            )
-
         # 時系列用のSequenceTransformer (時系列処理用)
         self.sequence_transformers = nn.ModuleDict()
         for seq_name in self.sequence_names:
@@ -549,23 +531,6 @@ class HorguesModel(nn.Module):
                 d_ffn=seq_d_ffn,
                 dropout=dropout
             )
-
-        self.general_ft_transformer = SequenceTransformer(
-            d_token=d_token,
-            n_layers=ft_n_layers,
-            n_heads=ft_n_heads,
-            d_ffn=ft_d_ffn,
-            dropout=dropout
-        )
-
-        # 最終統合用のFTTransformer
-        self.final_ft_transformer = SequenceTransformer(
-            d_token=d_token,
-            n_layers=ft_n_layers,
-            n_heads=ft_n_heads,
-            d_ffn=ft_d_ffn,
-            dropout=dropout
-        )
 
         # Race Transformer (レース内相互作用用)
         self.race_transformer = RaceTransformer(
@@ -603,9 +568,10 @@ class HorguesModel(nn.Module):
         horse_features = []
 
         for horse_idx in range(num_horses):
-            # 1. 時系列データの処理
-            sequence_features = []
+            # 全ての特徴量を格納するリスト（時系列・一般特徴量を同じように扱う）
+            all_features = []
             
+            # 1. 時系列データの処理
             for seq_name, seq_data in (sequence_data or {}).items():
                 # 時系列データから該当馬のデータを抽出
                 seq_x_num = {}
@@ -623,23 +589,21 @@ class HorguesModel(nn.Module):
                 if 'mask' in seq_data:
                     seq_mask = seq_data['mask'][:, horse_idx]  # (batch_size, seq_len)
 
-                # FeatureTokenizer -> FTTransformer -> SequenceTransformer
+                # FeatureTokenizer -> SequenceTransformer
                 seq_tokens = self.tokenizer(seq_x_num or None, seq_x_cat or None)  # (batch_size, seq_len, num_features, d_token)
                 
-                # 各時系列ステップの特徴量を統合
+                # 各時系列ステップの特徴量を統合（加算）
                 if seq_tokens.size(-2) > 0:  # 特徴量が存在する場合
                     batch_size_seq, seq_len, num_features, d_token = seq_tokens.shape
-                    seq_tokens_reshaped = seq_tokens.view(batch_size_seq * seq_len, num_features, d_token)
                     
-                    # FTTransformerで各時系列ステップの特徴量を統合
-                    step_features = self.sequence_ft_transformers[seq_name](seq_tokens_reshaped)  # (batch_size * seq_len, d_token)
-                    step_features = step_features.view(batch_size_seq, seq_len, d_token)  # (batch_size, seq_len, d_token)
+                    # 特徴量を加算で統合
+                    step_features = seq_tokens.sum(dim=-2)  # (batch_size, seq_len, d_token)
                     
                     # SequenceTransformerで時系列を処理
                     seq_feature = self.sequence_transformers[seq_name](step_features, seq_mask)  # (batch_size, d_token)
-                    sequence_features.append(seq_feature)
+                    all_features.append(seq_feature)
 
-            # 2. 一般データの処理
+            # 2. 一般データの処理（時系列と同じように扱う）
             general_x_num = {}
             general_x_cat = {}
             
@@ -652,16 +616,16 @@ class HorguesModel(nn.Module):
             # 一般データをトークン化
             general_tokens = self.tokenizer(general_x_num or None, general_x_cat or None)  # (batch_size, num_features, d_token)
             
-            # 一般データの特徴量を統合
+            # 一般データの各特徴量を個別に追加
             if general_tokens.size(-2) > 0:  # 特徴量が存在する場合
-                general_feature = self.general_ft_transformer(general_tokens)  # (batch_size, d_token)
-                sequence_features.append(general_feature)
+                for feature_idx in range(general_tokens.size(-2)):
+                    feature_token = general_tokens[:, feature_idx, :]  # (batch_size, d_token)
+                    all_features.append(feature_token)
 
-            # 3. 最終統合
-            if sequence_features:
-                # 全ての特徴量を統合
-                all_features = torch.stack(sequence_features, dim=1)  # (batch_size, num_feature_types, d_token)
-                horse_feature = self.final_ft_transformer(all_features)  # (batch_size, d_token)
+            # 3. 最終統合（1段階で全特徴量を加算）
+            if all_features:
+                # 全ての特徴量を加算で統合
+                horse_feature = torch.stack(all_features, dim=0).sum(dim=0)  # (batch_size, d_token)
             else:
                 # 特徴量がない場合はゼロベクトル
                 horse_feature = torch.zeros(batch_size, self.d_token, device=next(self.parameters()).device)
@@ -673,7 +637,7 @@ class HorguesModel(nn.Module):
         horse_vectors = torch.stack(horse_features, dim=1)  # (batch_size, num_horses, d_token)
         
         # RaceTransformerで相互作用を考慮した強さスコアを計算
-        scores = self.race_transformer(horse_vectors, mask)  # (batch_size, num_horses)
+        scores = self.race_transformer(horse_vectors, mask)  # (batch_size, num_horses, 3)
 
         return scores
 

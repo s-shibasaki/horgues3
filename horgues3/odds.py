@@ -83,7 +83,7 @@ def get_odds_dataframes(start_date: str, end_date: str, num_horses: int = 18) ->
         fukusho_df['min_odds'] = (pd.to_numeric(fukusho_df['min_odds'], errors='coerce') / 10.0).astype(np.float32)
         fukusho_df['max_odds'] = (pd.to_numeric(fukusho_df['max_odds'], errors='coerce') / 10.0).astype(np.float32)
         fukusho_df['avg_odds'] = ((fukusho_df['min_odds'] + fukusho_df['max_odds']) / 2.0).astype(np.float32)
-        fukusho_pivot = fukusho_df.pivot(index='race_id', columns='umaban', values='avg_odds')
+        fukusho_pivot = fukusho_df.pivot(index='race_id', columns='umaban', values='min_odds')
         fukusho_pivot.columns = [f'{int(col):02d}' for col in fukusho_pivot.columns]
         all_horses = [f'{i:02d}' for i in range(1, num_horses + 1)]
         results['fukusho'] = fukusho_pivot.reindex(columns=all_horses).fillna(0.0).astype(np.float32)
@@ -136,7 +136,7 @@ def get_odds_dataframes(start_date: str, end_date: str, num_horses: int = 18) ->
         wide_df['max_odds'] = (pd.to_numeric(wide_df['max_odds'], errors='coerce') / 10.0).astype(np.float32)
         wide_df['avg_odds'] = ((wide_df['min_odds'] + wide_df['max_odds']) / 2.0).astype(np.float32)
         # pivotしてからカラム名を変更
-        wide_pivot = wide_df.pivot(index='race_id', columns='kumiban', values='avg_odds')
+        wide_pivot = wide_df.pivot(index='race_id', columns='kumiban', values='min_odds')
         # カラム名を '01-02' 形式に変更
         wide_pivot.columns = [f"{col[:2]}-{col[2:]}" if len(col) == 4 else col 
                              for col in wide_pivot.columns]
