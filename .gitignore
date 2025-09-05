@@ -107,7 +107,6 @@ Thumbs.db
 *.weights
 models/
 checkpoints/
-experiments/
 outputs/
 runs/
 logs/

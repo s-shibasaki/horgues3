@@ -537,7 +537,7 @@ class HorguesModel(nn.Module):
             categorical_features: Dict[str, int],
 
             # 次元数 - 標準的な値に変更
-            d_token: int = 312,  # 中程度の表現力を持つ標準的な次元数
+            d_token: int = 256,  # 中程度の表現力を持つ標準的な次元数
 
             # SoftBinning 設定 - 標準的な値
             num_bins: int = 10,  # より一般的なビン数
@@ -545,14 +545,14 @@ class HorguesModel(nn.Module):
             binning_init_range: float = 3.0,  # 標準的な初期化範囲
 
             # 時系列統合Transformer - 標準的な設定
-            seq_n_layers: int = 4,
-            seq_n_heads: int = 12,
-            seq_d_ffn: int = 1200,  # d_token * 4 の標準的な比率
+            seq_n_layers: int = 2,
+            seq_n_heads: int = 4,
+            seq_d_ffn: int = 1024,  # d_token * 4 の標準的な比率
 
             # レース内相互作用Transformer - 標準的な設定
-            race_n_layers: int = 4,  # より軽量に
-            race_n_heads: int = 12,
-            race_d_ffn: int = 1200,  # d_token * 4 の標準的な比率
+            race_n_layers: int = 2,  # より軽量に
+            race_n_heads: int = 4,
+            race_d_ffn: int = 1024,  # d_token * 4 の標準的な比率
 
             # 過学習防止 - 標準的なドロップアウト率
             dropout: float = 0.1
