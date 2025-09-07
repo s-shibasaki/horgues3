@@ -960,7 +960,7 @@ class HorguesDataset(Dataset):
         # float32に変換
         numerical_data = numerical_data.astype(np.float32)
 
-        return numerical_data
+        return numerical_data.copy()
 
     def _process_categorical_data(self) -> pd.DataFrame:
         categorical_data = pd.DataFrame(index=self._race_data.index)
@@ -1050,7 +1050,7 @@ class HorguesDataset(Dataset):
         mask = (categorical_data['konkai_race_kyakushitsu_hantei'] == '0')
         categorical_data.loc[mask, 'konkai_race_kyakushitsu_hantei'] = None
 
-        return categorical_data
+        return categorical_data.copy()
     
     def _process_chokyo_numerical_data(self):
         numerical_data = pd.DataFrame(index=self._chokyo_data.index)
@@ -1082,7 +1082,7 @@ class HorguesDataset(Dataset):
         # Convert to float32
         numerical_data = numerical_data.astype(np.float32)
 
-        return numerical_data
+        return numerical_data.copy()
 
     def _process_chokyo_categorical_data(self):
         categorical_data = pd.DataFrame(index=self._chokyo_data.index)
@@ -1104,7 +1104,7 @@ class HorguesDataset(Dataset):
             mask = (categorical_data['baba_mawari'] == '0')
             categorical_data.loc[mask, 'baba_mawari'] = None
 
-        return categorical_data
+        return categorical_data.copy()
     
     def _process_meta_data(self) -> pd.DataFrame:
         meta_data = pd.DataFrame(index=self._race_data.index)
@@ -1135,7 +1135,7 @@ class HorguesDataset(Dataset):
         # mask
         meta_data['mask'] = self._race_data['ijo_kubun_code'].isin(['0', '4', '5', '6', '7'])
 
-        return meta_data
+        return meta_data.copy()
     
     def _process_chokyo_meta_data(self):
         meta_data = pd.DataFrame(index=self._chokyo_data.index)
@@ -1148,7 +1148,7 @@ class HorguesDataset(Dataset):
         # chokyo_datetime
         meta_data['chokyo_datetime'] = pd.to_datetime(self._chokyo_data['chokyo_date'] + self._chokyo_data['chokyo_jikoku'], format='%Y%m%d%H%M')
         
-        return meta_data
+        return meta_data.copy()
     
     def _fit_scaler(self) -> Dict[str, Dict[str, float]]:
         scaler_params = {}
@@ -1277,7 +1277,7 @@ class HorguesDataset(Dataset):
             mean = self._scaler_params[alias]['mean']
             std = self._scaler_params[alias]['std']
             scaled_data[column] = (self._numerical_data[column] - mean) / std
-        return scaled_data
+        return scaled_data.copy()
 
     def _encode_categorical_features(self):
         encoded_data = pd.DataFrame(index=self._categorical_data.index)
@@ -1285,7 +1285,7 @@ class HorguesDataset(Dataset):
             alias = self._feature_aliases.get(column, column)
             mapping = self._encoder_params[alias]
             encoded_data[column] = self._categorical_data[column].map(mapping).fillna(0).astype(np.int64)
-        return encoded_data
+        return encoded_data.copy()
     
     def _scale_chokyo_numerical_features(self) -> pd.DataFrame:
         """調教データの数値特徴量をスケーリング"""
@@ -1295,7 +1295,7 @@ class HorguesDataset(Dataset):
             mean = self._chokyo_scaler_params[alias]['mean']
             std = self._chokyo_scaler_params[alias]['std']
             scaled_data[column] = (self._chokyo_numerical_data[column] - mean) / std
-        return scaled_data
+        return scaled_data.copy()
 
     def _encode_chokyo_categorical_features(self) -> pd.DataFrame:
         """調教データのカテゴリカル特徴量をエンコーディング"""
@@ -1304,7 +1304,7 @@ class HorguesDataset(Dataset):
             alias = self._feature_aliases.get(column, column)
             mapping = self._chokyo_encoder_params[alias]
             encoded_data[column] = self._chokyo_categorical_data[column].map(mapping).fillna(0).astype(np.int64)
-        return encoded_data
+        return encoded_data.copy()
 
     def _precompute_history_groups(self):
         history_groups = {}
