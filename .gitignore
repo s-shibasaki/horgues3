@@ -122,6 +122,7 @@ cache/
 *.feather
 *.json
 *.jsonl
+*.xlsx
 data/
 datasets/
 raw_data/
