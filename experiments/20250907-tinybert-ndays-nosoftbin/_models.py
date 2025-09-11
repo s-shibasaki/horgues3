@@ -10,125 +10,23 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class SoftBinning(nn.Module):
-    """
-    標準化済み数値特徴量をソフトビニングするモジュール
-    
-    Args:
-        num_bins: ビンの数
-        temperature: ソフトマックスの温度パラメータ（低いほどハード、高いほどソフト）
-        init_range: ビン中心の初期化範囲 [-init_range, init_range]
-    """
-    
-    def __init__(self, num_bins: int = 10, temperature: float = 1.0, init_range: float = 3.0):
-        super().__init__()
-        self.num_bins = num_bins
-        self.temperature = temperature
-        
-        # 学習可能なビン中心（標準化されたデータを想定して初期化）
-        self.bin_centers = nn.Parameter(
-            torch.linspace(-init_range, init_range, num_bins)
-        )
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: 標準化済み数値特徴量 (...,) 任意の形状
-        Returns:
-            binned: ソフトビニング結果 (..., num_bins)
-        """
-        # 入力の形状を保存
-        original_shape = x.shape
-        
-        # xを展開して計算しやすくする
-        x_flat = x.view(-1, 1)  # (N, 1)
-        bin_centers = self.bin_centers.view(1, -1)  # (1, num_bins)
-        
-        # 各ビン中心との距離を計算（負の二乗距離）
-        distances = -(x_flat - bin_centers) ** 2  # (N, num_bins)
-        
-        # 温度でスケールしてソフトマックス
-        soft_assignments = F.softmax(distances / self.temperature, dim=-1)  # (N, num_bins)
-        
-        # 元の形状に戻す
-        output_shape = original_shape + (self.num_bins,)
-        return soft_assignments.view(output_shape)
-
-
-
-
-class SoftBinnedLinear(nn.Module):
-    """
-    数値特徴量をSoftBinningしてからLinear変換するモジュール
-    
-    Args:
-        num_bins: ビンの数
-        d_token: 出力次元
-        temperature: ソフトマックスの温度パラメータ
-        init_range: ビン中心の初期化範囲
-        dropout: ドロップアウト率
-    """
-    
-    def __init__(self, num_bins: int = 10, d_token: int = 192, temperature: float = 1.0, 
-                 init_range: float = 3.0):
-        super().__init__()
-        self.soft_binning = SoftBinning(
-            num_bins=num_bins,
-            temperature=temperature,
-            init_range=init_range
-        )
-        self.linear = nn.Linear(num_bins, d_token)
-
-        self._init_weights()
-        
-    def _init_weights(self):
-        """重みの初期化"""
-        # Linearレイヤーの重み初期化 (Xavier uniform)
-        nn.init.xavier_uniform_(self.linear.weight)
-        if self.linear.bias is not None:
-            nn.init.constant_(self.linear.bias, 0)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: 標準化済み数値特徴量 (...,) 任意の形状
-        Returns:
-            output: (..., d_token) Linear変換後の特徴量
-        """
-        # SoftBinning適用
-        binned = self.soft_binning(x)  # (..., num_bins)
-        
-        # Linear変換
-        output = self.linear(binned)  # (..., d_token)
-        
-        return output
-
-
 class FeatureTokenizer(nn.Module):
     """数値特徴量とカテゴリ特徴量をトークン化（共通利用）"""
 
     def __init__(self, numerical_features: List[str], categorical_features: Dict[str, int], feature_aliases: Dict[str, str],
-                 d_token: int = 192, num_bins: int = 10, binning_temperature: float = 1.0,
-                 binning_init_range: float = 3.0, dropout: float = 0.1,
-                 # 新しいパラメータ：特徴量結合用のTransformer設定
-                 feature_transformer_layers: int = 2, feature_transformer_heads: int = 4):
+                 d_token: int = 192, dropout: float = 0.1):
         super().__init__()
         self.d_token = d_token
         self.numerical_features = numerical_features
         self.categorical_features = categorical_features
         self.feature_aliases = feature_aliases
 
-        # 数値特徴量用のSoftBinnedLinear（特徴量ごとに個別）
+        # 数値特徴量用のLinear（特徴量ごとに個別）
         self.numerical_tokenizers = nn.ModuleDict()
         for feature in numerical_features:
             tokenizer_name = self.feature_aliases.get(feature, feature)
             if tokenizer_name not in self.numerical_tokenizers:
-                self.numerical_tokenizers[tokenizer_name] = SoftBinnedLinear(
-                    num_bins=num_bins,
-                    d_token=d_token,
-                    temperature=binning_temperature,
-                    init_range=binning_init_range,
-                )
+                self.numerical_tokenizers[tokenizer_name] = nn.Linear(1, d_token)
 
         # カテゴリ特徴量用の埋め込み
         self.categorical_tokenizers = nn.ModuleDict()
@@ -137,27 +35,38 @@ class FeatureTokenizer(nn.Module):
             if tokenizer_name not in self.categorical_tokenizers:
                 self.categorical_tokenizers[tokenizer_name] = nn.Embedding(vocab_size + 1, d_token, padding_idx=0) 
 
-        # 特徴量結合用のTransformerエンコーダー
+        # トークン統合用のMLPレイヤー
         n_tokens = len(numerical_features) + len(categorical_features)
-        self.feature_transformer = SequenceTransformer(
-            d_token=d_token,
-            n_layers=feature_transformer_layers,
-            n_heads=feature_transformer_heads,
-            d_ffn=d_token * 4,  # 標準的な比率
-            dropout=dropout,
-            max_seq_len=n_tokens  # 特徴量数に合わせて設定
-        )
+        self.gelu = nn.GELU()
+        self.linear = nn.Linear(n_tokens * d_token, d_token)
+        self.norm = nn.LayerNorm(d_token)
+        self.dropout = nn.Dropout(dropout)
 
         self._init_weights()
 
     def _init_weights(self):
         """重みの初期化"""
+        # 数値特徴量用Linearの初期化
+        for linear in self.numerical_tokenizers.values():
+            nn.init.xavier_uniform_(linear.weight)
+            if linear.bias is not None:
+                nn.init.constant_(linear.bias, 0)
+        
         # カテゴリ埋め込みの初期化
         for embedding in self.categorical_tokenizers.values():
             nn.init.normal_(embedding.weight, mean=0, std=0.02)
             # padding_idxは0で固定
             if embedding.padding_idx is not None:
                 nn.init.constant_(embedding.weight[embedding.padding_idx], 0)
+        
+        # 統合用線形層の初期化
+        nn.init.xavier_uniform_(self.linear.weight)
+        if self.linear.bias is not None:
+            nn.init.constant_(self.linear.bias, 0)
+        
+        # LayerNormの初期化（通常はデフォルトで適切）
+        nn.init.constant_(self.norm.weight, 1.0)
+        nn.init.constant_(self.norm.bias, 0.0)
 
     def forward(self, x_num: Optional[Dict[str, torch.Tensor]] = None, 
                 x_cat: Optional[Dict[str, torch.Tensor]] = None):
@@ -169,7 +78,6 @@ class FeatureTokenizer(nn.Module):
             output: (..., d_token) - 統合された特徴量
         """
         tokens = []
-        token_masks = []
 
         # 数値特徴量のトークン化（定義された順序でループ）
         for name in self.numerical_features:
@@ -183,15 +91,13 @@ class FeatureTokenizer(nn.Module):
                 nan_mask = torch.isnan(feature_values)
                 clean_values = torch.where(nan_mask, torch.zeros_like(feature_values), feature_values)
                 
-                # SoftBinnedLinearで変換
-                token = tokenizer(clean_values)  # (..., d_token)
+                # Linearで変換（入力を1次元追加）
+                clean_values_unsqueezed = clean_values.unsqueeze(-1)  # (..., 1)
+                token = tokenizer(clean_values_unsqueezed)  # (..., d_token)
 
                 # NaN位置のトークンをゼロにする
                 nan_mask = nan_mask.unsqueeze(-1)  # (..., 1)
                 token = torch.where(nan_mask, torch.zeros_like(token), token)
-                
-                # マスクを作成（NaNでない場合は有効）
-                token_mask = (~nan_mask.squeeze(-1)).float()  # (...,)
             else:
                 # 特徴量が存在しない場合はゼロトークンを作成
                 # 他の特徴量から形状を推定
@@ -206,13 +112,8 @@ class FeatureTokenizer(nn.Module):
                 # サンプルテンソルの形状でゼロトークンを作成
                 token_shape = sample_tensor.shape + (self.d_token,)
                 token = torch.zeros(token_shape, device=sample_tensor.device, dtype=torch.float32)
-                
-                # マスクも無効として設定
-                mask_shape = sample_tensor.shape
-                token_mask = torch.zeros(mask_shape, device=sample_tensor.device, dtype=torch.float32)
             
             tokens.append(token)
-            token_masks.append(token_mask)
 
         # カテゴリ特徴量のトークン化（定義された順序でループ）
         for name in self.categorical_features.keys():
@@ -222,9 +123,6 @@ class FeatureTokenizer(nn.Module):
             if x_cat is not None and name in x_cat:
                 feature_values = x_cat[name]
                 token = tokenizer(feature_values)  # (..., d_token)
-                
-                # パディングIDでない場合は有効
-                token_mask = (feature_values != 0).float()  # (...,)
             else:
                 # 特徴量が存在しない場合はパディングIDでトークンを作成
                 # 他の特徴量から形状を推定
@@ -240,23 +138,19 @@ class FeatureTokenizer(nn.Module):
                 padding_shape = sample_tensor.shape
                 padding_tensor = torch.zeros(padding_shape, device=sample_tensor.device, dtype=torch.long)
                 token = tokenizer(padding_tensor)  # (..., d_token)
-                
-                # マスクも無効として設定
-                token_mask = torch.zeros(padding_shape, device=sample_tensor.device, dtype=torch.float32)
             
             tokens.append(token)
-            token_masks.append(token_mask)
 
-        # トークンを時系列次元でstack（各特徴量が1つのトークンになる）
-        # (..., n_features, d_token)の形状にする
-        feature_tokens = torch.stack(tokens, dim=-2)  
-        feature_masks = torch.stack(token_masks, dim=-1)  # (..., n_features)
+        # トークンをconcatenate
+        concatenated = torch.cat(tokens, dim=-1)  # (..., n_tokens * d_token)
 
-        # Transformerエンコーダーで特徴量を統合
-        # CLSトークンの出力を使用
-        integrated_features = self.feature_transformer(feature_tokens, feature_masks)  # (..., d_token)
+        # GELU -> Linear -> Norm -> Dropout
+        output = self.gelu(concatenated)
+        output = self.linear(output)  # (..., d_token)
+        output = self.norm(output)
+        output = self.dropout(output)
         
-        return integrated_features
+        return output
     
 
 class AttentionHead(nn.Module):
@@ -552,18 +446,15 @@ class HorguesModel(nn.Module):
             # 次元数 - 標準的な値に変更
             d_token: int = 256,  # 中程度の表現力を持つ標準的な次元数
 
-            # SoftBinning 設定 - 標準的な値
-            num_bins: int = 10,  # より一般的なビン数
-            binning_temperature: float = 1.0,  # 標準的な温度パラメータ
-            binning_init_range: float = 3.0,  # 標準的な初期化範囲
-
             # 時系列統合Transformer - 標準的な設定
             seq_n_layers: int = 2,
             seq_n_heads: int = 4,
+            seq_d_ffn: int = 1024,  # d_token * 4 の標準的な比率
 
             # レース内相互作用Transformer - 標準的な設定
             race_n_layers: int = 2,  # より軽量に
             race_n_heads: int = 4,
+            race_d_ffn: int = 1024,  # d_token * 4 の標準的な比率
 
             # 過学習防止 - 標準的なドロップアウト率
             dropout: float = 0.1
@@ -577,15 +468,12 @@ class HorguesModel(nn.Module):
         self.numerical_features = numerical_features
         self.categorical_features = categorical_features
 
-        # 共通のFeatureTokenizer（SoftBinning対応）
+        # 共通のFeatureTokenizer（通常のLinear使用）
         self.tokenizer = FeatureTokenizer(
             numerical_features=self.numerical_features,
             categorical_features=self.categorical_features,
             feature_aliases=self.feature_aliases,
             d_token=d_token,
-            num_bins=num_bins,
-            binning_temperature=binning_temperature,
-            binning_init_range=binning_init_range,
             dropout=dropout
         )
 
@@ -594,7 +482,7 @@ class HorguesModel(nn.Module):
             d_token=d_token,
             n_layers=seq_n_layers,
             n_heads=seq_n_heads,
-            d_ffn=d_token * 4,
+            d_ffn=seq_d_ffn,
             dropout=dropout
         )
 
@@ -603,7 +491,7 @@ class HorguesModel(nn.Module):
             d_token=d_token,
             n_layers=race_n_layers,
             n_heads=race_n_heads,
-            d_ffn=d_token * 4,
+            d_ffn=race_d_ffn,
             dropout=dropout
         )
 
